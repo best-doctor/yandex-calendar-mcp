@@ -1,6 +1,7 @@
 """Живой тест записи: создать → изменить → прочитать → удалить для события, серии и задачи.
 
-Для серии дополнительно проверяются правка и удаление одного экземпляра и sync-token до и после удаления.
+Для серии дополнительно проверяются правка и удаление одного экземпляра, перенос всей серии
+и sync-token до и после удаления.
 Тестовые объекты ставятся на 03:00 завтрашнего дня, без участников, чтобы никому не улетели приглашения.
 Удаление выполняется в finally, чтобы не оставить мусор при падении посередине.
 """
@@ -15,8 +16,8 @@ import typing
 
 from yandex_calendar_mcp.client import YandexCalendarClient
 from yandex_calendar_mcp.config import Settings
-from yandex_calendar_mcp.dto import EventCreateDto, EventUpdateDto, SyncResult, TodoCreateDto
-from yandex_calendar_mcp.errors import EventNotFoundError
+from yandex_calendar_mcp.dto import EventCreateDto, EventInfo, EventUpdateDto, SyncResult, TodoCreateDto
+from yandex_calendar_mcp.errors import EventNotFoundError, InvalidEventError
 from yandex_calendar_mcp.ical import calendar_id__from_url
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
@@ -78,6 +79,12 @@ def check_event(client: YandexCalendarClient) -> None:
         raise AssertionError('event still exists after delete')
 
 
+def series__instances(
+    client: YandexCalendarClient, uid: str, calendar_id: str, start: datetime.date, end: datetime.date
+) -> list[EventInfo]:
+    return [event for event in client.events__list(start=start, end=end, calendar_id=calendar_id) if event.uid == uid]
+
+
 def check_series_and_sync(client: YandexCalendarClient) -> None:
     """Серия из трёх ежедневных экземпляров: второй переносится на час, третий удаляется."""
     calendar_id = calendar_id__from_url(str(client.calendar__for_write(None, component='VEVENT').url))
@@ -110,20 +117,33 @@ def check_series_and_sync(client: YandexCalendarClient) -> None:
                 start=moved_start,
             )
         )
-        client.event__delete(created.uid, calendar_id=calendar_id, recurrence_id=starts[2])
-        instances = [
-            event
-            for event in client.events__list(start=tomorrow, end=starts[2].date(), calendar_id=calendar_id)
-            if event.uid == created.uid
-        ]
-        print(f'[series] instances: {[(e.summary, e.start.isoformat(), e.recurrence_id) for e in instances]}')
+        # Сдвиг всей серии на 30 минут: перенесённый экземпляр остаётся на своём времени
+        series_start = starts[0] + datetime.timedelta(minutes=30)
+        client.event__update(EventUpdateDto(uid=created.uid, calendar_id=calendar_id, start=series_start))
+        shifted = series__instances(client, created.uid, calendar_id, tomorrow, starts[2].date())
+        print(f'[series] after shift: {[(e.summary, e.start.isoformat()) for e in shifted]}')
+        third_start = starts[2] + datetime.timedelta(minutes=30)
+        if [e.start for e in shifted] != [series_start, moved_start, third_start]:
+            raise AssertionError('series shift should move regular instances and keep the moved one')
+
+        client.event__delete(created.uid, calendar_id=calendar_id, recurrence_id=third_start)
+        instances = series__instances(client, created.uid, calendar_id, tomorrow, starts[2].date())
+        print(f'[series] instances: {[(e.summary, e.start.isoformat()) for e in instances]}')
         if [(e.summary, e.start) for e in instances] != [
-            (f'{MARKER} серия', starts[0]),
+            (f'{MARKER} серия', series_start),
             (f'{MARKER} экземпляр', moved_start),
         ]:
-            raise AssertionError('expected original first instance, moved second, no third')
+            raise AssertionError('expected shifted first instance, moved second, no third')
         if instances[1].end != moved_start + datetime.timedelta(minutes=30):
             raise AssertionError(f'moved instance should keep 30 min, got {instances[1].end}')
+
+        # С удалённым экземпляром перенос серии отклоняется до записи: Яндекс воскресил бы его
+        try:
+            client.event__update(EventUpdateDto(uid=created.uid, calendar_id=calendar_id, start=starts[0]))
+        except InvalidEventError as exc:
+            print(f'[series] shift with deleted instance refused: {exc}')
+        else:
+            raise AssertionError('series shift with EXDATE should be refused')
 
         changes = sync__wait_for(
             client,
@@ -155,6 +175,8 @@ def check_todo(client: YandexCalendarClient) -> None:
 
         completed = client.todo__complete(created.uid, calendar_id=created.calendar_id)
         print(f'[todo] completed: {completed.action}')
+        client.todo__complete(created.uid, calendar_id=created.calendar_id)
+        print('[todo] repeated complete is a no-op')
         done = [
             t
             for t in client.todos__list(calendar_id=created.calendar_id, include_completed=True)

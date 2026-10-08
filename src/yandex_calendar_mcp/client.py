@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import collections
 import datetime
 import functools
 import logging
@@ -32,25 +31,46 @@ from yandex_calendar_mcp.dto import (
     TodoInfo,
     WriteResult,
 )
-from yandex_calendar_mcp.errors import CalendarNotFoundError, EventConflictError, EventNotFoundError, SyncTokenError
+from yandex_calendar_mcp.errors import (
+    CalendarNotFoundError,
+    EventConflictError,
+    EventNotFoundError,
+    InvalidEventError,
+    SyncTokenError,
+)
 from yandex_calendar_mcp.ical import (
     DateLike,
     calendar_id__from_url,
     date_like__to_date,
     date_like__to_datetime,
+    dtstart__get,
+    events__by_days,
     events__filter_by_text,
     events__from_icalendar,
+    exdates__get,
     free_slots__between_events,
+    vcalendar__apply_update,
     vcalendar__exclude_occurrence,
     vcalendar__master,
-    vcalendar__occurrence_for_edit,
-    vevent__apply_update,
+    vcalendar__set_partstat,
     vevent__build,
     vtodo__build,
+    vtodo__mark_completed,
     vtodo__to_todo_info,
 )
 
 log = logging.getLogger(__name__)
+
+PARTSTAT_BY_RESPONSE: dict[InviteResponse, str] = {
+    'accept': 'ACCEPTED',
+    'decline': 'DECLINED',
+    'tentative': 'TENTATIVE',
+}
+ACTION_BY_RESPONSE: dict[InviteResponse, typing.Literal['accepted', 'declined', 'tentative']] = {
+    'accept': 'accepted',
+    'decline': 'declined',
+    'tentative': 'tentative',
+}
 
 # Временные сбои: сеть, таймауты, 5xx, 429. Остальное падает сразу.
 RETRYABLE_ERRORS = (
@@ -58,14 +78,19 @@ RETRYABLE_ERRORS = (
     caldav_error.ResponseError,
     caldav_error.ReportError,
     caldav_error.PropfindError,
-    ConnectionError,
-    TimeoutError,
+    # PUT с фиксированным uid и DELETE идемпотентны; 4xx отсекает giveup
+    caldav_error.PutError,
+    caldav_error.DeleteError,
+    # ConnectionError и TimeoutError — подклассы OSError
     OSError,
 )
+# Яндекс держит события и задачи в коллекциях events-* и todos-*: запасной вариант, если сервер не отдал компоненты
+COMPONENTS_BY_ID_PREFIX = {'events-': ['VEVENT'], 'todos-': ['VTODO']}
 
 
-# Ошибки caldav не несут код ответа атрибутом, он есть только в тексте: "ReportError at '400 Bad Request'"
-HTTP_STATUS_PATTERN = re.compile(r'\b([1-5]\d\d)\b')
+# Ошибки caldav не несут код ответа атрибутом, он есть только в тексте: "ReportError at '400 Bad Request'".
+# Код ищется вместе с текстом статуса, иначе совпадёт любое число, например port=443 в сетевой ошибке.
+HTTP_STATUS_PATTERN = re.compile(r'\b([1-5]\d\d) [A-Z][A-Za-z]')
 # calendar-multiget за один запрос; 148 объектов Яндекс отдаёт примерно за 6 секунд
 MULTIGET_CHUNK_SIZE = 100
 
@@ -74,6 +99,8 @@ def http_status__from_error(exc: Exception) -> int | None:
     status = getattr(exc, 'status', None) or getattr(getattr(exc, 'response', None), 'status_code', None)
     if isinstance(status, int):
         return status
+    if not isinstance(exc, caldav_error.DAVError):
+        return None
     match = HTTP_STATUS_PATTERN.search(str(exc))
     return int(match.group(1)) if match else None
 
@@ -171,13 +198,23 @@ class YandexCalendarClient:
         )
 
     # ---------------------------------------------------------------- чтение
+    @retry_on_transient_error
+    def calendar__components(self, cal: Calendar) -> list[str]:
+        return list(typing.cast(list[str], cal.get_supported_components()) or [])
+
     def calendars__list(self) -> list[CalendarInfo]:
         result: list[CalendarInfo] = []
         for calendar_id, cal in self.calendars_by_id.items():
             try:
-                components = list(typing.cast(list[str], cal.get_supported_components()) or [])
-            except caldav_error.DAVError:
-                components = []
+                components = self.calendar__components(cal)
+            except caldav_error.AuthorizationError:
+                raise
+            except caldav_error.DAVError as exc:
+                # Без этого календарь с временным сбоем выпал бы из всех запросов до рестарта: результат кешируется
+                log.warning('supported components failed for %s: %s', calendar_id, exc)
+                components = next(
+                    (value for prefix, value in COMPONENTS_BY_ID_PREFIX.items() if calendar_id.startswith(prefix)), []
+                )
             result.append(
                 CalendarInfo(
                     id=calendar_id,
@@ -194,7 +231,7 @@ class YandexCalendarClient:
 
     @retry_on_transient_error
     def object__by_uid(self, cal: Calendar, uid: str) -> CalendarObjectResource:
-        return typing.cast(CalendarObjectResource, cal.event_by_uid(uid))
+        return typing.cast(CalendarObjectResource, cal.get_event_by_uid(uid))
 
     def events__list(
         self,
@@ -236,7 +273,8 @@ class YandexCalendarClient:
     ) -> tuple[list[EventInfo], DateLike, DateLike]:
         """Окно по умолчанию: с сегодня на default_days. Возвращает события и фактические границы."""
         start = start if start is not None else datetime.datetime.now(self.tz).date()
-        end = end if end is not None else date_like__to_date(start) + datetime.timedelta(days=default_days)
+        # Правая граница включается, поэтому default_days дней это start + default_days - 1
+        end = end if end is not None else date_like__to_date(start) + datetime.timedelta(days=default_days - 1)
         events = self.events__list(start=start, end=end, calendar_id=calendar_id, expand=expand, query=query)
         return events, start, end
 
@@ -268,13 +306,8 @@ class YandexCalendarClient:
         self, *, date_from: datetime.date, days: int, calendar_id: str | None = None
     ) -> list[DayAgenda]:
         end = date_from + datetime.timedelta(days=days - 1)
-        grouped: dict[datetime.date, list[EventInfo]] = collections.defaultdict(list)
-        for event in self.events__list(start=date_from, end=end, calendar_id=calendar_id, expand=True):
-            grouped[date_like__to_date(event.start)].append(event)
-        return [
-            DayAgenda(date=day, events=grouped.get(day, []))
-            for day in (date_from + datetime.timedelta(days=offset) for offset in range(days))
-        ]
+        events = self.events__list(start=date_from, end=end, calendar_id=calendar_id, expand=True)
+        return events__by_days(events, date_from=date_from, days=days, tz=self.tz)
 
     def todos__list(self, *, calendar_id: str | None = None, include_completed: bool = False) -> list[TodoInfo]:
         todos: list[TodoInfo] = []
@@ -282,8 +315,13 @@ class YandexCalendarClient:
             calendar_id_current = calendar_id__from_url(str(cal.url))
             try:
                 objects = self.objects__search(cal, todo=True, include_completed=include_completed)
+            except caldav_error.AuthorizationError:
+                raise
             except caldav_error.DAVError as exc:
-                # Часть календарей Яндекса отвечает ошибкой на запрос VTODO; пропускаем такой календарь
+                # Часть календарей Яндекса отвечает ошибкой на запрос VTODO: при обходе всех календарей пропускаем,
+                # а явно запрошенный календарь должен вернуть ошибку, а не пустой список
+                if calendar_id is not None:
+                    raise
                 log.debug('todo search failed for %s: %s', calendar_id_current, exc)
                 continue
             todos.extend(
@@ -333,7 +371,9 @@ class YandexCalendarClient:
                 cal.get_objects_by_sync_token(sync_token, load_objects=False, disable_fallback=True),
             )
         except caldav_error.DAVError as exc:
-            if http_status__from_error(exc) in (400, 403, 409, 412):
+            # RFC 6578 отвечает на чужой токен 403 (valid-sync-token), caldav поднимает его как AuthorizationError.
+            # Авторизация к этому моменту уже прошла: календарь найден по PROPFIND
+            if isinstance(exc, caldav_error.AuthorizationError) or http_status__from_error(exc) in (400, 409, 412):
                 raise SyncTokenError(
                     'Сервер не принял sync_token: устарел или выдан для другого календаря. '
                     'Вызовите sync_changes без sync_token, чтобы получить новый.'
@@ -409,10 +449,10 @@ class YandexCalendarClient:
         return typing.cast(CalendarObjectResource, cal.add_event(ical=ical))
 
     @retry_on_transient_error
-    def object__save(self, obj: CalendarObjectResource) -> None:
+    def object__save(self, obj: CalendarObjectResource, *, increase_seqno: bool = True) -> None:
         # only_this_recurrence=False: объект уже содержит мастер и все переопределения, caldav не должен их сливать
         try:
-            obj.save(only_this_recurrence=False)
+            obj.save(increase_seqno=increase_seqno, only_this_recurrence=False)
         except (caldav_error.ETagMismatchError, caldav_error.ScheduleTagMismatchError) as exc:
             raise EventConflictError('Объект изменился на сервере, перечитайте его и повторите') from exc
 
@@ -431,11 +471,16 @@ class YandexCalendarClient:
         """Без recurrence_id меняет мастер, то есть всю серию. С ним только один экземпляр через переопределение."""
         cal, obj = self.object__find(dto.uid, calendar_id=dto.calendar_id)
         with obj.edit_icalendar_instance() as calendar:
-            if dto.recurrence_id is None:
-                component = vcalendar__master(calendar)
-            else:
-                component = vcalendar__occurrence_for_edit(calendar, dto.recurrence_id, self.tz)
-            vevent__apply_update(component, dto, self.tz)
+            master = vcalendar__master(calendar)
+            old_start = dtstart__get(master)
+            vcalendar__apply_update(calendar, dto, self.tz)
+            if dto.recurrence_id is None and dtstart__get(master) != old_start and exdates__get(master):
+                # Проверено на живом аккаунте: при переносе серии Яндекс выбрасывает все EXDATE, удалённые экземпляры
+                # воскресают, а повторный PUT с EXDATE он отбивает 504. Отказываем до записи, объект не меняется
+                raise InvalidEventError(
+                    'У серии есть удалённые экземпляры: при переносе времени серии Яндекс вернёт их обратно '
+                    'и не даст удалить снова. Перенесите серию в веб-интерфейсе Яндекс Календаря.'
+                )
         self.object__save(obj)
         return WriteResult(
             action='updated',
@@ -466,23 +511,27 @@ class YandexCalendarClient:
             recurrence_id=recurrence_id,
         )
 
-    @retry_on_transient_error
     def invite__respond(self, uid: str, *, response: InviteResponse, calendar_id: str | None = None) -> WriteResult:
+        """PARTSTAT своего адреса во всех VEVENT объекта и PUT. Ответ организатору рассылает сервер (auto-schedule).
+
+        accept_invite из caldav не подходит: он ждёт объект из schedule-inbox, заново ищет principal,
+        который на Яндексе не находится автоматически, и меняет только первый VEVENT серии.
+        """
         cal, obj = self.object__find(uid, calendar_id=calendar_id)
-        if response == 'accept':
-            obj.accept_invite()
-            action: typing.Literal['accepted', 'declined', 'tentative'] = 'accepted'
-        elif response == 'decline':
-            obj.decline_invite()
-            action = 'declined'
-        else:
-            obj.tentatively_accept_invite()
-            action = 'tentative'
-        return WriteResult(action=action, uid=uid, calendar_id=calendar_id__from_url(str(cal.url)), url=str(obj.url))
+        with obj.edit_icalendar_instance() as calendar:
+            vcalendar__set_partstat(calendar, self.settings.email, PARTSTAT_BY_RESPONSE[response])
+        # SEQUENCE меняет только организатор
+        self.object__save(obj, increase_seqno=False)
+        return WriteResult(
+            action=ACTION_BY_RESPONSE[response],
+            uid=uid,
+            calendar_id=calendar_id__from_url(str(cal.url)),
+            url=str(obj.url),
+        )
 
     @retry_on_transient_error
     def todo__by_uid(self, cal: Calendar, uid: str) -> Todo:
-        return typing.cast(Todo, cal.todo_by_uid(uid))
+        return typing.cast(Todo, cal.get_todo_by_uid(uid))
 
     def todo__find(self, uid: str, *, calendar_id: str | None) -> tuple[Calendar, Todo]:
         for cal in self.calendars__for_query(calendar_id, component='VTODO'):
@@ -499,10 +548,13 @@ class YandexCalendarClient:
         obj = self.object__add(cal, ical=ical, todo=True)
         return WriteResult(action='created', uid=uid, calendar_id=calendar_id__from_url(str(cal.url)), url=str(obj.url))
 
-    @retry_on_transient_error
     def todo__complete(self, uid: str, *, calendar_id: str | None = None) -> WriteResult:
+        """Идемпотентно: уже выполненная задача не трогается. Todo.complete из caldav падает на ней голым assert."""
         cal, todo = self.todo__find(uid, calendar_id=calendar_id)
-        todo.complete()
+        with todo.edit_icalendar_component() as component:
+            changed = vtodo__mark_completed(component)
+        if changed:
+            self.object__save(todo)
         return WriteResult(
             action='completed', uid=uid, calendar_id=calendar_id__from_url(str(cal.url)), url=str(todo.url)
         )

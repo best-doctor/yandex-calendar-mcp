@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import types
 import typing
@@ -10,8 +11,10 @@ from unittest import mock
 
 import icalendar
 import pytest
+import recurring_ical_events
 from caldav.lib import error as caldav_error
 from caldav.lib.url import URL
+from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import SecretStr
 
 from yandex_calendar_mcp.client import YandexCalendarClient, caldav_error__is_permanent, http_status__from_error
@@ -20,11 +23,16 @@ from yandex_calendar_mcp.dto import EventUpdateDto
 from yandex_calendar_mcp.errors import InvalidEventError, SyncTokenError
 from yandex_calendar_mcp.ical import (
     events__from_icalendar,
+    vcalendar__apply_update,
     vcalendar__exclude_occurrence,
     vcalendar__master,
     vcalendar__occurrence_for_edit,
+    vcalendar__override_find,
+    vcalendar__set_partstat,
     vevent__apply_update,
+    vtodo__mark_completed,
 )
+from yandex_calendar_mcp.server import domain_errors__as_tool_error
 
 MSK = zoneinfo.ZoneInfo('Europe/Moscow')
 CALENDAR_URL = 'https://caldav.yandex.ru/calendars/me%40yandex.ru/events-1/'
@@ -138,6 +146,8 @@ def test_occurrence_edit_moves_only_this_instance() -> None:
     ('ics', 'recurrence_id', 'message'),
     [
         (ICS_SERIES, datetime.datetime(2026, 9, 30, 14, 0), 'нет экземпляра'),
+        # Новое время перенесённого экземпляра не равно его исходному началу
+        (ICS_SERIES, datetime.datetime(2026, 10, 7, 13, 30), 'нет экземпляра'),
         (ICS_SERIES, datetime.datetime(2026, 10, 21, 15, 0), 'нет экземпляра'),
         (ICS_SERIES, datetime.date(2026, 10, 21), 'должен содержать время'),
         (ICS_ALLDAY_SERIES, datetime.datetime(2026, 10, 11, 0, 0), 'датой без времени'),
@@ -188,8 +198,10 @@ def test_exclude_occurrence_adds_exdate_and_drops_override() -> None:
     [
         (caldav_error.ReportError('400 Bad Request\n\n'), 400, True),
         (caldav_error.ResponseError('HTTP/1.1 507 Insufficient Storage'), 507, False),
-        (caldav_error.RateLimitError('429 Too Many Requests'), 429, False),
+        (caldav_error.RateLimitError('Rate limited, retry after 30'), None, False),
         (ConnectionError('reset by peer'), None, False),
+        (ConnectionError("HTTPSConnectionPool(host='caldav.yandex.ru', port=443): Max retries"), None, False),
+        (caldav_error.ReportError('https://caldav.yandex.ru/calendars/me/events-1/404.ics'), None, False),
     ],
 )
 def test_http_status_is_parsed_from_caldav_error_text(exc: Exception, status: int | None, permanent: bool) -> None:
@@ -245,13 +257,177 @@ def test_sync_with_token_returns_changed_and_deleted() -> None:
     cal.get_objects_by_sync_token.assert_called_once_with('sync-token:1 100', load_objects=False, disable_fallback=True)
 
 
-@pytest.mark.parametrize('token', ['sync-token:1 garbage', 'fake-abc'])
-def test_sync_rejects_unknown_token(token: str) -> None:
-    """Токен, который сервер отклонил с 400, и фейковый токен caldav дают SyncTokenError без ретраев."""
+@pytest.mark.parametrize(
+    'exc',
+    [caldav_error.ReportError('400 Bad Request\n\n'), caldav_error.AuthorizationError(reason='Forbidden')],
+)
+def test_sync_rejects_unknown_token(exc: Exception) -> None:
+    """Токен, отклонённый сервером (400 у Яндекса, 403 по RFC 6578), даёт SyncTokenError без ретраев."""
     cal = mock.Mock()
-    cal.get_objects_by_sync_token.side_effect = caldav_error.ReportError('400 Bad Request\n\n')
+    cal.get_objects_by_sync_token.side_effect = exc
 
     with pytest.raises(SyncTokenError):
-        _sync_client(cal).sync__changes('events-1', sync_token=token)
+        _sync_client(cal).sync__changes('events-1', sync_token='sync-token:1 garbage')
 
-    assert cal.get_objects_by_sync_token.call_count <= 1
+    assert cal.get_objects_by_sync_token.call_count == 1
+
+
+def test_sync_rejects_caldav_fake_token_without_request() -> None:
+    """Фейковый токен caldav отклоняется до запроса: по нему caldav молча выкачал бы весь календарь."""
+    cal = mock.Mock()
+
+    with pytest.raises(SyncTokenError):
+        _sync_client(cal).sync__changes('events-1', sync_token='fake-abc')
+
+    cal.get_objects_by_sync_token.assert_not_called()
+
+
+def test_series_shift_moves_overrides_and_exdates_with_master() -> None:
+    """Перенос серии на час: переопределения и EXDATE едут вместе, удалённый экземпляр не воскресает."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+    vcalendar__exclude_occurrence(calendar, datetime.datetime(2026, 10, 21, 14, 0), MSK)
+
+    vcalendar__apply_update(calendar, EventUpdateDto(uid='series-1', start=datetime.datetime(2026, 9, 23, 15, 0)), MSK)
+
+    occurrences = recurring_ical_events.of(calendar).between(datetime.date(2026, 10, 1), datetime.date(2026, 11, 1))
+    assert [_dt(item, 'DTSTART') for item in occurrences] == [datetime.datetime(2026, 10, 7, 13, 30, tzinfo=MSK)]
+    override = vcalendar__override_find(calendar, datetime.datetime(2026, 10, 7, 15, 0, tzinfo=MSK), MSK)
+    assert override is not None
+
+
+def test_series_shift_refuses_type_change_with_overrides() -> None:
+    """Перевод серии с переопределениями в «весь день» отклоняется: RECURRENCE-ID не пересчитать однозначно."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+
+    with pytest.raises(InvalidEventError, match='весь день'):
+        vcalendar__apply_update(calendar, EventUpdateDto(uid='series-1', start=datetime.date(2026, 9, 23)), MSK)
+
+
+def test_occurrence_update_bumps_override_sequence() -> None:
+    """Правка экземпляра поднимает SEQUENCE переопределения, мастер поднимет caldav при сохранении."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+    dto = EventUpdateDto(uid='series-1', recurrence_id=datetime.datetime(2026, 10, 21, 14, 0), summary='x')
+
+    vcalendar__apply_update(calendar, dto, MSK)
+
+    override = vcalendar__override_find(calendar, datetime.datetime(2026, 10, 21, 14, 0, tzinfo=MSK), MSK)
+    assert override is not None
+    assert override['SEQUENCE'] == 7
+    assert vcalendar__master(calendar)['SEQUENCE'] == 6
+
+
+ICS_INVITE = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:test
+BEGIN:VEVENT
+UID:invite-1
+DTSTART;TZID=Europe/Moscow:20261008T150000
+DTEND;TZID=Europe/Moscow:20261008T160000
+RRULE:FREQ=WEEKLY;COUNT=3
+ORGANIZER:mailto:boss@example.com
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:Me@Yandex.ru
+ATTENDEE;PARTSTAT=ACCEPTED:mailto:other@example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:invite-1
+RECURRENCE-ID;TZID=Europe/Moscow:20261015T150000
+DTSTART;TZID=Europe/Moscow:20261015T170000
+DTEND;TZID=Europe/Moscow:20261015T180000
+ORGANIZER:mailto:boss@example.com
+ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:me@yandex.ru
+END:VEVENT
+END:VCALENDAR
+"""
+
+
+def test_set_partstat_updates_own_attendee_in_every_vevent() -> None:
+    """Ответ на приглашение меняет PARTSTAT своего адреса в мастере и в переопределениях, чужих не трогает."""
+    calendar = icalendar.Calendar.from_ical(ICS_INVITE)
+
+    vcalendar__set_partstat(calendar, 'me@yandex.ru', 'ACCEPTED')
+
+    events = events__from_icalendar(calendar, calendar_id='events-1', url=None, tz=MSK)
+    statuses = [[(a.email.lower(), a.status) for a in event.attendees] for event in events]
+    assert statuses == [
+        [('me@yandex.ru', 'ACCEPTED'), ('other@example.com', 'ACCEPTED')],
+        [('me@yandex.ru', 'ACCEPTED')],
+    ]
+    assert 'RSVP' not in calendar.to_ical().decode()
+
+
+def test_set_partstat_rejects_non_attendee() -> None:
+    """Если пользователя нет среди участников, ответ не отправляется."""
+    calendar = icalendar.Calendar.from_ical(ICS_INVITE)
+
+    with pytest.raises(InvalidEventError, match='не участник'):
+        vcalendar__set_partstat(calendar, 'stranger@yandex.ru', 'DECLINED')
+
+
+def test_mark_completed_is_idempotent() -> None:
+    """Первый вызов закрывает задачу, повторный ничего не меняет и не падает."""
+    todo = icalendar.Todo()
+    todo.add('UID', 't')
+    todo.add('STATUS', 'NEEDS-ACTION')
+
+    assert vtodo__mark_completed(todo) is True
+    assert todo['STATUS'] == 'COMPLETED'
+    assert todo['PERCENT-COMPLETE'] == 100
+    assert vtodo__mark_completed(todo) is False
+
+
+def test_network_error_after_retries_reaches_model_as_text() -> None:
+    """Сетевая ошибка после исчерпания ретраев уходит модели текстом, а не безымянной ошибкой тула."""
+
+    @domain_errors__as_tool_error
+    def failing() -> None:
+        raise ConnectionError('connection reset')
+
+    with pytest.raises(ToolError, match='Нет связи с CalDAV-сервером'):
+        failing()
+
+
+class FakeEditableObject:
+    """Объект caldav с edit_icalendar_instance поверх готового VCALENDAR."""
+
+    def __init__(self, ics: str) -> None:
+        self.calendar = icalendar.Calendar.from_ical(ics)
+        self.url = URL.objectify(f'{CALENDAR_URL}series-1.ics')
+
+    @contextlib.contextmanager
+    def edit_icalendar_instance(self) -> typing.Iterator[icalendar.Calendar]:
+        yield self.calendar
+
+
+def test_series_shift_with_exdate_is_refused_before_put() -> None:
+    """Перенос серии с удалённым экземпляром отклоняется до записи: Яндекс выбросил бы EXDATE."""
+    client = _client()
+    obj = FakeEditableObject(ICS_SERIES)
+    vcalendar__exclude_occurrence(obj.calendar, datetime.datetime(2026, 10, 21, 14, 0), MSK)
+    cal = types.SimpleNamespace(url=URL.objectify(CALENDAR_URL))
+    dto = EventUpdateDto(uid='series-1', start=datetime.datetime(2026, 9, 23, 15, 0))
+
+    with (
+        mock.patch.object(client, 'object__find', return_value=(cal, obj)),
+        mock.patch.object(client, 'object__save') as save,
+        pytest.raises(InvalidEventError, match='удалённые экземпляры'),
+    ):
+        client.event__update(dto)
+
+    save.assert_not_called()
+
+
+def test_series_summary_update_with_exdate_is_allowed() -> None:
+    """Без переноса времени серия с удалённым экземпляром правится как обычно."""
+    client = _client()
+    obj = FakeEditableObject(ICS_SERIES)
+    vcalendar__exclude_occurrence(obj.calendar, datetime.datetime(2026, 10, 21, 14, 0), MSK)
+    cal = types.SimpleNamespace(url=URL.objectify(CALENDAR_URL))
+
+    with (
+        mock.patch.object(client, 'object__find', return_value=(cal, obj)),
+        mock.patch.object(client, 'object__save') as save,
+    ):
+        client.event__update(EventUpdateDto(uid='series-1', summary='Новое'))
+
+    save.assert_called_once()
+    assert vcalendar__master(obj.calendar)['SUMMARY'] == 'Новое'

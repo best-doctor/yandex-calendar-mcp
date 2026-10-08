@@ -12,6 +12,7 @@ import recurring_ical_events
 
 from yandex_calendar_mcp.dto import (
     Attendee,
+    DayAgenda,
     EventCreateDto,
     EventInfo,
     EventUpdateDto,
@@ -218,11 +219,22 @@ def date_like__localize(value: DateLike, tz: zoneinfo.ZoneInfo) -> DateLike:
 
 
 def date_like__for_ical(value: DateLike, tz: zoneinfo.ZoneInfo) -> DateLike:
-    """Дата-время уходит на сервер в UTC, чтобы не тащить VTIMEZONE. Дата остаётся датой."""
+    """Дата-время уходит на сервер в таймзоне tz (TZID), дата остаётся датой.
+
+    UTC не годится: серия в зоне с переходом на летнее время уехала бы на час после перехода.
+    """
     localized = date_like__localize(value, tz)
     if isinstance(localized, datetime.datetime):
-        return localized.astimezone(datetime.UTC)
+        return localized.astimezone(tz)
     return localized
+
+
+def component__zone(component: icalendar.Component, tz: zoneinfo.ZoneInfo) -> zoneinfo.ZoneInfo:
+    """IANA-таймзона DTSTART компонента, иначе таймзона пользователя. Правка не меняет зону события."""
+    raw = getattr(component.get('DTSTART'), 'dt', None)
+    if isinstance(raw, datetime.datetime) and isinstance(raw.tzinfo, zoneinfo.ZoneInfo) and raw.tzinfo.key != 'UTC':
+        return raw.tzinfo
+    return tz
 
 
 def event_end__resolve(start: DateLike, end: DateLike | None, duration_minutes: int | None) -> DateLike:
@@ -231,6 +243,10 @@ def event_end__resolve(start: DateLike, end: DateLike | None, duration_minutes: 
         if type(end) is not type(start):
             raise InvalidEventError('start и end должны быть одного типа: обе даты или оба дата-время.')
         if end <= start:
+            if not isinstance(start, datetime.datetime):
+                raise InvalidEventError(
+                    'Для события на весь день end не включается: один день 2026-10-10 это end=2026-10-11.'
+                )
             raise InvalidEventError('end должен быть позже start.')
         return end
     if isinstance(start, datetime.datetime):
@@ -251,6 +267,7 @@ def vcalendar__wrap(component: icalendar.Component) -> icalendar.Calendar:
     calendar.add('PRODID', PRODID)
     calendar.add('VERSION', '2.0')
     calendar.add_component(component)
+    calendar.add_missing_timezones()
     return calendar
 
 
@@ -277,7 +294,7 @@ def vevent__build(dto: EventCreateDto, *, uid: str, tz: zoneinfo.ZoneInfo) -> ic
 
 
 def vevent__apply_update(component: icalendar.Component, dto: EventUpdateDto, tz: zoneinfo.ZoneInfo) -> None:
-    """Меняет только переданные поля прямо в компоненте, который взят через edit_icalendar_component."""
+    """Меняет только переданные поля прямо в компоненте. Даты пишутся в зоне события, DURATION заменяется на DTEND."""
     text_fields = {
         'SUMMARY': dto.summary,
         'DESCRIPTION': dto.description,
@@ -287,22 +304,28 @@ def vevent__apply_update(component: icalendar.Component, dto: EventUpdateDto, tz
     for key, value in text_fields.items():
         if value is not None:
             component[key] = value
-    if dto.start is not None or dto.end is not None:
-        current_start = ical_value__to_timezone(component.get('DTSTART'), tz)
-        current_end = ical_value__to_timezone(component.get('DTEND'), tz)
-        if current_start is None:
-            raise InvalidEventError('У события нет DTSTART, обновить даты нельзя.')
-        start = date_like__localize(dto.start, tz) if dto.start is not None else current_start
-        if dto.end is not None:
-            end = event_end__resolve(start, date_like__localize(dto.end, tz), None)
-        elif current_end is not None and type(current_end) is type(start):
-            # Перенос только начала сохраняет длительность события
-            end = start + (current_end - current_start)
-        else:
-            end = event_end__resolve(start, None, None)
-        for key, date_value in (('DTSTART', start), ('DTEND', end)):
-            component.pop(key, None)
-            component.add(key, date_like__for_ical(date_value, tz))
+    if dto.start is None and dto.end is None:
+        return
+    zone = component__zone(component, tz)
+    current_start = ical_value__to_timezone(component.get('DTSTART'), zone)
+    if current_start is None:
+        raise InvalidEventError('У события нет DTSTART, обновить даты нельзя.')
+    current_end = ical_value__to_timezone(component.get('DTEND'), zone)
+    duration = component.get('DURATION')
+    if current_end is None and duration is not None:
+        current_end = current_start + duration.dt
+    start = date_like__for_ical(dto.start, zone) if dto.start is not None else current_start
+    if dto.end is not None:
+        end = event_end__resolve(start, date_like__for_ical(dto.end, zone), None)
+    elif current_end is not None and type(current_end) is type(start):
+        # Перенос только начала сохраняет длительность события
+        end = start + (current_end - current_start)
+    else:
+        end = event_end__resolve(start, None, None)
+    for key in ('DTSTART', 'DTEND', 'DURATION'):
+        component.pop(key, None)
+    component.add('DTSTART', start)
+    component.add('DTEND', end)
 
 
 def vtodo__build(dto: TodoCreateDto, *, uid: str, tz: zoneinfo.ZoneInfo) -> icalendar.Calendar:
@@ -367,12 +390,21 @@ def vcalendar__override_find(
 
 
 def series__has_occurrence(calendar: icalendar.Calendar, recurrence_id: DateLike, tz: zoneinfo.ZoneInfo) -> bool:
-    """Есть ли у серии экземпляр с таким исходным началом. EXDATE уже исключены."""
+    """Есть ли у серии экземпляр с таким исходным началом. EXDATE уже исключены.
+
+    Раскрывается только мастер: с переопределениями recurring_ical_events отдал бы перенесённый экземпляр
+    с новым DTSTART, и его новое время ошибочно сошло бы за исходное.
+    """
+    series = icalendar.Calendar()
+    for component in calendar.subcomponents:
+        if component.name == 'VTIMEZONE':
+            series.add_component(component)
+    series.add_component(vcalendar__master(calendar))
     if isinstance(recurrence_id, datetime.datetime):
         moment = date_like__to_datetime(recurrence_id, tz).astimezone(tz)
-        occurrences = recurring_ical_events.of(calendar).between(moment, moment + datetime.timedelta(minutes=1))
+        occurrences = recurring_ical_events.of(series).between(moment, moment + datetime.timedelta(minutes=1))
         return any(ical_value__to_timezone(item.get('DTSTART'), tz) == moment for item in occurrences)
-    occurrences = recurring_ical_events.of(calendar).at(recurrence_id)
+    occurrences = recurring_ical_events.of(series).at(recurrence_id)
     return any(dtstart__get(item) == recurrence_id for item in occurrences)
 
 
@@ -415,3 +447,118 @@ def vcalendar__exclude_occurrence(calendar: icalendar.Calendar, recurrence_id: D
     if existing is not None:
         calendar.subcomponents.remove(existing)
     master.add('EXDATE', normalized)
+
+
+def exdates__get(master: icalendar.Component) -> list[DateLike]:
+    raw = master.get('EXDATE')
+    if raw is None:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    return [typing.cast(DateLike, value.dt) for item in items for value in item.dts]
+
+
+def occurrence__shift(value: DateLike, old_start: DateLike, new_start: DateLike) -> DateLike:
+    """Сдвигает исходное начало экземпляра так же, как сдвинулся DTSTART мастера, в локальном времени серии."""
+    if not isinstance(value, datetime.datetime):
+        return value + (date_like__to_date(new_start) - date_like__to_date(old_start))
+    if not isinstance(old_start, datetime.datetime) or not isinstance(new_start, datetime.datetime):
+        raise InvalidEventError('У серии со временем начало тоже должно быть дата-временем.')
+    zone = new_start.tzinfo
+    old_local = old_start.astimezone(zone) if zone is not None and old_start.tzinfo is not None else old_start
+    local = value.astimezone(zone) if zone is not None and value.tzinfo is not None else value
+    delta = new_start.replace(tzinfo=None) - old_local.replace(tzinfo=None)
+    return (local.replace(tzinfo=None) + delta).replace(tzinfo=zone)
+
+
+def series__shift(calendar: icalendar.Calendar, old_start: DateLike, new_start: DateLike) -> None:
+    """После переноса мастера сдвигает RECURRENCE-ID переопределений и EXDATE, иначе они осиротеют:
+    удалённые экземпляры вернутся, перенесённые задвоятся."""
+    master = vcalendar__master(calendar)
+    if old_start == new_start or (master.get('RRULE') is None and master.get('RDATE') is None):
+        return
+    overrides = [c for c in calendar.walk('VEVENT') if c.get('RECURRENCE-ID') is not None]
+    exdates = exdates__get(master)
+    if not overrides and not exdates:
+        return
+    if type(old_start) is not type(new_start):
+        raise InvalidEventError(
+            'Нельзя перевести серию между «весь день» и «со временем», пока у неё есть перенесённые '
+            'или удалённые экземпляры.'
+        )
+    for override in overrides:
+        recurrence_id = typing.cast(DateLike, override.get('RECURRENCE-ID').dt)
+        override.pop('RECURRENCE-ID')
+        override.add('RECURRENCE-ID', occurrence__shift(recurrence_id, old_start, new_start))
+    master.pop('EXDATE', None)
+    for exdate in exdates:
+        master.add('EXDATE', occurrence__shift(exdate, old_start, new_start))
+
+
+def sequence__increment(component: icalendar.Component) -> None:
+    sequence = int(component.get('SEQUENCE', 0))
+    component.pop('SEQUENCE', None)
+    component.add('SEQUENCE', sequence + 1)
+
+
+def vcalendar__apply_update(calendar: icalendar.Calendar, dto: EventUpdateDto, tz: zoneinfo.ZoneInfo) -> None:
+    """Правка объекта: без recurrence_id мастер (вся серия), с ним один экземпляр через переопределение.
+
+    SEQUENCE мастера поднимает caldav при сохранении, SEQUENCE переопределения поднимаем сами,
+    иначе участники по RFC 5546 могут не принять обновление экземпляра.
+    """
+    if dto.recurrence_id is not None:
+        override = vcalendar__occurrence_for_edit(calendar, dto.recurrence_id, tz)
+        vevent__apply_update(override, dto, tz)
+        sequence__increment(override)
+    else:
+        master = vcalendar__master(calendar)
+        old_start = dtstart__get(master)
+        vevent__apply_update(master, dto, tz)
+        series__shift(calendar, old_start, dtstart__get(master))
+    calendar.add_missing_timezones()
+
+
+def vcalendar__set_partstat(calendar: icalendar.Calendar, email: str, partstat: str) -> None:
+    """Ставит PARTSTAT участнику email во всех VEVENT объекта, включая переопределения экземпляров."""
+    found = False
+    for component in calendar.walk('VEVENT'):
+        raw = component.get('ATTENDEE')
+        for attendee in raw if isinstance(raw, list) else [raw] if raw is not None else []:
+            if mailto__strip(attendee).casefold() == email.casefold():
+                attendee.params['PARTSTAT'] = partstat
+                attendee.params.pop('RSVP', None)
+                found = True
+    if not found:
+        raise InvalidEventError(f'{email} не участник этого события, отвечать на приглашение нечего.')
+
+
+def vtodo__mark_completed(component: icalendar.Component) -> bool:
+    """False, если задача уже выполнена: повторный вызов не ошибка."""
+    if str(component.get('STATUS', '')).upper() == 'COMPLETED' or component.get('COMPLETED') is not None:
+        return False
+    for key in ('STATUS', 'COMPLETED', 'PERCENT-COMPLETE'):
+        component.pop(key, None)
+    component.add('STATUS', 'COMPLETED')
+    component.add('COMPLETED', datetime.datetime.now(datetime.UTC))
+    component.add('PERCENT-COMPLETE', 100)
+    return True
+
+
+def events__by_days(
+    events: list[EventInfo], *, date_from: datetime.date, days: int, tz: zoneinfo.ZoneInfo
+) -> list[DayAgenda]:
+    """Раскладывает события по дням окна. Многодневное и ночное событие попадает в каждый свой день."""
+    window = [date_from + datetime.timedelta(days=offset) for offset in range(days)]
+    grouped: dict[datetime.date, list[EventInfo]] = {day: [] for day in window}
+    for event in events:
+        first = date_like__to_date(ical_value__to_timezone(event.start, tz) or event.start)
+        last = first
+        if isinstance(event.end, datetime.datetime):
+            # Конец не включается: событие до 00:00 не занимает следующий день
+            last = max(first, (event.end.astimezone(tz) - datetime.timedelta(microseconds=1)).date())
+        elif event.end is not None:
+            last = max(first, event.end - datetime.timedelta(days=1))
+        for day in window:
+            if first <= day <= last:
+                grouped[day].append(event)
+    return [DayAgenda(date=day, events=grouped[day]) for day in window]

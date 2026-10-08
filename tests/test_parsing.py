@@ -11,14 +11,16 @@ from unittest import mock
 import icalendar
 import pydantic
 import pytest
+import recurring_ical_events
 from pydantic import SecretStr
 
 from yandex_calendar_mcp.client import YandexCalendarClient
 from yandex_calendar_mcp.config import Settings
-from yandex_calendar_mcp.dto import EventCreateDto, EventUpdateDto, TodoCreateDto
+from yandex_calendar_mcp.dto import EventCreateDto, EventInfo, EventUpdateDto, TodoCreateDto
 from yandex_calendar_mcp.errors import InvalidEventError
 from yandex_calendar_mcp.ical import (
     calendar_id__from_url,
+    events__by_days,
     events__from_icalendar,
     vevent__apply_update,
     vevent__build,
@@ -45,6 +47,18 @@ ATTENDEE;CN=Other;PARTSTAT=NEEDS-ACTION:mailto:other@example.com
 RRULE:FREQ=WEEKLY
 X-TELEMOST-CONFERENCE:https://telemost.yandex.ru/j/123
 LAST-MODIFIED:20261001T100000Z
+END:VEVENT
+END:VCALENDAR
+"""
+
+ICS_DURATION = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:test
+BEGIN:VEVENT
+UID:dur-1
+SUMMARY:Длинная
+DTSTART;TZID=Europe/Moscow:20261008T150000
+DURATION:PT2H
 END:VEVENT
 END:VCALENDAR
 """
@@ -170,6 +184,35 @@ def test_agenda_groups_events_by_day(client: YandexCalendarClient) -> None:
     assert [(day.date.day, len(day.events)) for day in agenda] == [(8, 1), (9, 0)]
 
 
+def test_agenda_puts_multi_day_event_into_every_day() -> None:
+    """Событие на весь день 10–11.10 (DTEND 12.10 не включается) видно в повестке, начатой с 11.10."""
+    events = events__from_icalendar(icalendar.Calendar.from_ical(ICS_ALLDAY), calendar_id='events-1', url=None, tz=MSK)
+
+    agenda = events__by_days(events, date_from=datetime.date(2026, 10, 11), days=2, tz=MSK)
+
+    assert [(day.date.day, len(day.events)) for day in agenda] == [(11, 1), (12, 0)]
+
+
+def test_agenda_timed_event_ending_at_midnight_stays_in_one_day() -> None:
+    """Событие 23:00–00:00 не попадает в следующий день."""
+    event = EventInfo(
+        uid='n',
+        calendar_id='events-1',
+        start=datetime.datetime(2026, 10, 8, 23, 0, tzinfo=MSK),
+        end=datetime.datetime(2026, 10, 9, 0, 0, tzinfo=MSK),
+    )
+
+    agenda = events__by_days([event], date_from=datetime.date(2026, 10, 8), days=2, tz=MSK)
+
+    assert [(day.date.day, len(day.events)) for day in agenda] == [(8, 1), (9, 0)]
+
+
+def test_settings_reject_unknown_timezone() -> None:
+    """Опечатка в таймзоне даёт ошибку валидации, а не KeyError из zoneinfo."""
+    with pytest.raises(pydantic.ValidationError, match='Неизвестная таймзона'):
+        Settings(_env_file=None, email='me@yandex.ru', key=SecretStr('x' * 16), tz='Europe/Moskow')  # type: ignore[call-arg]
+
+
 def test_settings_require_full_login(monkeypatch: pytest.MonkeyPatch) -> None:
     """Логин без @ отклоняется."""
     monkeypatch.setenv('YANDEX_CALDAV_EMAIL', 'justlogin')
@@ -224,8 +267,8 @@ async def test_write_mode_registers_read_and_write_tools() -> None:
     assert await _tool_names('write') == READ_TOOLS | WRITE_TOOLS
 
 
-def test_vevent_build_uses_utc_duration_attendees_and_rrule() -> None:
-    """Собранный VEVENT: время в UTC, конец из длительности, участники с RSVP, RRULE."""
+def test_vevent_build_uses_tzid_duration_attendees_and_rrule() -> None:
+    """Собранный VEVENT: время с TZID и VTIMEZONE, конец из длительности, участники с RSVP, RRULE."""
     dto = EventCreateDto(
         summary='Созвон',
         start=datetime.datetime(2026, 10, 9, 15, 0),
@@ -239,12 +282,49 @@ def test_vevent_build_uses_utc_duration_attendees_and_rrule() -> None:
     component = next(c for c in calendar.walk('VEVENT'))
 
     assert component['UID'] == 'u-1'
-    assert _dt(component, 'DTSTART') == datetime.datetime(2026, 10, 9, 12, 0, tzinfo=datetime.UTC)
-    assert _dt(component, 'DTEND') == datetime.datetime(2026, 10, 9, 12, 45, tzinfo=datetime.UTC)
+    assert _dt(component, 'DTSTART') == datetime.datetime(2026, 10, 9, 15, 0, tzinfo=MSK)
+    assert component['DTSTART'].params['TZID'] == 'Europe/Moscow'
+    assert _dt(component, 'DTEND') == datetime.datetime(2026, 10, 9, 15, 45, tzinfo=MSK)
     assert str(component['ATTENDEE']) == 'mailto:a@example.com'
     assert typing.cast(icalendar.vCalAddress, component['ATTENDEE']).params['RSVP'] == 'TRUE'
     assert typing.cast(icalendar.vRecur, component['RRULE'])['COUNT'] == [3]
-    assert 'VTIMEZONE' not in {c.name for c in calendar.subcomponents}
+    assert 'VTIMEZONE' in {c.name for c in calendar.subcomponents}
+
+
+def test_vevent_build_series_keeps_local_time_across_dst() -> None:
+    """Серия в зоне с переходом времени остаётся в 10:00 после перехода: время пишется с TZID, а не в UTC."""
+    berlin = zoneinfo.ZoneInfo('Europe/Berlin')
+    dto = EventCreateDto(summary='x', start=datetime.datetime(2026, 10, 19, 10, 0), rrule='FREQ=WEEKLY;COUNT=3')
+
+    calendar = icalendar.Calendar.from_ical(vevent__build(dto, uid='u', tz=berlin).to_ical())
+    occurrences = recurring_ical_events.of(calendar).between(datetime.date(2026, 10, 1), datetime.date(2026, 12, 1))
+    starts = [_dt(c, 'DTSTART') for c in occurrences]
+
+    assert [start.hour for start in starts] == [10, 10, 10]
+
+
+@pytest.mark.parametrize(
+    ('raw', 'expected'),
+    [('RRULE:FREQ=WEEKLY', 'FREQ=WEEKLY'), (' FREQ=DAILY;COUNT=3 ', 'FREQ=DAILY;COUNT=3')],
+)
+def test_rrule_is_normalized(raw: str, expected: str) -> None:
+    """Префикс RRULE: и пробелы убираются."""
+    assert EventCreateDto(summary='x', start=datetime.date(2026, 10, 10), rrule=raw).rrule == expected
+
+
+@pytest.mark.parametrize('raw', ['garbage', 'COUNT=3', 'FREQ=WEEKLY;COUNT=x'])
+def test_rrule_without_freq_or_unparsable_is_rejected(raw: str) -> None:
+    """Правило без FREQ или с битым значением отклоняется на входе, а не превращается в пустой RRULE."""
+    with pytest.raises(pydantic.ValidationError):
+        EventCreateDto(summary='x', start=datetime.date(2026, 10, 10), rrule=raw)
+
+
+def test_all_day_end_equal_to_start_explains_exclusive_end() -> None:
+    """Для события на весь день end не включается, ошибка подсказывает, что передать."""
+    dto = EventCreateDto(summary='x', start=datetime.date(2026, 10, 10), end=datetime.date(2026, 10, 10))
+
+    with pytest.raises(InvalidEventError, match='end=2026-10-11'):
+        vevent__build(dto, uid='u', tz=MSK)
 
 
 def test_vevent_build_all_day_defaults_to_one_day() -> None:
@@ -273,8 +353,19 @@ def test_vevent_apply_update_changes_only_given_fields() -> None:
 
     assert component['SUMMARY'] == 'Новое имя'
     assert component['LOCATION'] == 'Переговорка 3'
-    assert _dt(component, 'DTSTART') == datetime.datetime(2026, 10, 8, 11, 0, tzinfo=datetime.UTC)
-    assert _dt(component, 'DTEND') == datetime.datetime(2026, 10, 8, 12, 0, tzinfo=datetime.UTC)
+    assert _dt(component, 'DTSTART') == datetime.datetime(2026, 10, 8, 14, 0, tzinfo=MSK)
+    assert component['DTSTART'].params['TZID'] == 'Europe/Moscow'
+    assert _dt(component, 'DTEND') == datetime.datetime(2026, 10, 8, 15, 0, tzinfo=MSK)
+
+
+def test_vevent_apply_update_replaces_duration_with_dtend() -> None:
+    """Событие с DURATION: перенос сохраняет длительность, DURATION уходит, чтобы не было DTEND вместе с ним."""
+    component = next(c for c in icalendar.Calendar.from_ical(ICS_DURATION).walk('VEVENT'))
+
+    vevent__apply_update(component, EventUpdateDto(uid='dur-1', start=datetime.datetime(2026, 10, 8, 18, 0)), MSK)
+
+    assert 'DURATION' not in component
+    assert _dt(component, 'DTEND') == datetime.datetime(2026, 10, 8, 20, 0, tzinfo=MSK)
 
 
 def test_vtodo_build() -> None:
@@ -295,6 +386,8 @@ def test_vtodo_build() -> None:
     [
         ('2026-10-09', datetime.date(2026, 10, 9)),
         ('2026-10-09T15:00', datetime.datetime(2026, 10, 9, 15, 0)),
+        ('2026-10-09T00:00', datetime.datetime(2026, 10, 9, 0, 0)),
+        ('2026-10-09T00:00:00Z', datetime.datetime(2026, 10, 9, 0, 0, tzinfo=datetime.UTC)),
         (
             '2026-10-09T15:00:00+03:00',
             datetime.datetime(2026, 10, 9, 15, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=3))),

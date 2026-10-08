@@ -1,9 +1,33 @@
 from __future__ import annotations
 
 import datetime
+import re
 import typing
 
-from pydantic import BaseModel, ConfigDict, Field
+import icalendar
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+
+DATE_ONLY_PATTERN = re.compile(r'\d{4}-\d{2}-\d{2}')
+
+
+def date_like__parse(value: typing.Any) -> typing.Any:
+    """Строка ровно YYYY-MM-DD становится датой (весь день), любая другая строка дата-временем.
+
+    Без этого pydantic превращает 2026-10-09T00:00 и даже 2026-10-09T00:00Z в дату: полночь теряет время и таймзону.
+    """
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if DATE_ONLY_PATTERN.fullmatch(text):
+        return datetime.date.fromisoformat(text)
+    return datetime.datetime.fromisoformat(text)
+
+
+DateLikeInput = typing.Annotated[
+    datetime.datetime | datetime.date,
+    BeforeValidator(date_like__parse),
+    Field(description='ISO 8601: дата (2026-10-08) = весь день, или дата-время (2026-10-08T15:00)'),
+]
 
 
 class BaseDto(BaseModel):
@@ -96,11 +120,30 @@ InviteResponse = typing.Literal['accept', 'decline', 'tentative']
 EventStatus = typing.Literal['CONFIRMED', 'TENTATIVE', 'CANCELLED']
 
 
-# Во входных DTO date стоит раньше datetime: строка 2026-10-08 должна стать датой (весь день)
+def rrule__normalize(value: str | None) -> str | None:
+    """Убирает префикс RRULE: и проверяет, что правило разбирается и содержит FREQ."""
+    if value is None:
+        return None
+    text = value.strip()
+    if text.upper().startswith('RRULE:'):
+        text = text[len('RRULE:') :]
+    try:
+        recur = icalendar.vRecur.from_ical(text)
+    except ValueError as exc:
+        raise ValueError(f'Некорректный RRULE {value!r}: {exc}') from exc
+    if 'FREQ' not in recur:
+        raise ValueError(f'RRULE {value!r} должен содержать FREQ, например FREQ=WEEKLY;COUNT=5')
+    return text
+
+
 class EventCreateDto(BaseDto):
     summary: str = Field(min_length=1)
-    start: datetime.date | datetime.datetime = Field(description='Дата = событие на весь день')
-    end: datetime.date | datetime.datetime | None = Field(default=None, description='Если нет, см. duration_minutes')
+    start: DateLikeInput = Field(description='Дата = событие на весь день')
+    end: DateLikeInput | None = Field(
+        default=None,
+        description='Если нет, см. duration_minutes. Для события на весь день end не включается: '
+        'один день 2026-10-10 это end=2026-10-11',
+    )
     duration_minutes: int | None = Field(default=None, ge=1, description='Альтернатива end. По умолчанию 60 минут')
     description: str | None = None
     location: str | None = None
@@ -108,25 +151,27 @@ class EventCreateDto(BaseDto):
     rrule: str | None = Field(default=None, description='Правило повтора RFC 5545, например FREQ=WEEKLY;COUNT=5')
     calendar_id: str | None = Field(default=None, description='Из list_calendars. None = первый календарь')
 
+    _rrule__validate = field_validator('rrule')(rrule__normalize)
+
 
 class EventUpdateDto(BaseDto):
     uid: str
     calendar_id: str | None = None
-    recurrence_id: datetime.date | datetime.datetime | None = Field(
+    recurrence_id: DateLikeInput | None = Field(
         default=None,
         description='Экземпляр серии: recurrence_id из list_events. None = мастер-событие, то есть вся серия',
     )
     summary: str | None = None
     description: str | None = None
     location: str | None = None
-    start: datetime.date | datetime.datetime | None = None
-    end: datetime.date | datetime.datetime | None = None
+    start: DateLikeInput | None = None
+    end: DateLikeInput | None = Field(default=None, description='Для события на весь день end не включается')
     status: EventStatus | None = None
 
 
 class TodoCreateDto(BaseDto):
     summary: str = Field(min_length=1)
-    due: datetime.date | datetime.datetime | None = None
+    due: DateLikeInput | None = None
     description: str | None = None
     priority: int | None = Field(default=None, ge=1, le=9, description='1 — самый высокий')
     calendar_id: str | None = None

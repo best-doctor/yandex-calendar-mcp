@@ -30,7 +30,11 @@ class Settings(BaseSettings):
     @field_validator('tz')
     @classmethod
     def tz__must_be_known(cls, value: str) -> str:
-        zoneinfo.ZoneInfo(value)
+        # ZoneInfoNotFoundError это KeyError: pydantic не превращает его в ошибку валидации
+        try:
+            zoneinfo.ZoneInfo(value)
+        except (zoneinfo.ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f'Неизвестная таймзона {value!r}, нужна IANA вроде Europe/Moscow') from exc
         return value
 
     @field_validator('email')

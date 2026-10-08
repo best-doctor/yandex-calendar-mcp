@@ -23,6 +23,7 @@ from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.dto import (
     CalendarInfo,
     ConnectionInfo,
+    DateLikeInput,
     DayAgenda,
     EventCreateDto,
     EventInfo,
@@ -51,14 +52,9 @@ CalendarIdParam = typing.Annotated[
     str | None,
     Field(description='id или имя календаря из list_calendars. None = все календари'),
 ]
-# date стоит первым: pydantic перебирает варианты по порядку, и строка 2026-10-08 должна стать датой
-# (целый день), а не полуночью этого дня
-DateParam = typing.Annotated[
-    datetime.date | datetime.datetime | None,
-    Field(description='ISO 8601: дата (2026-10-08) = весь день, или дата-время (2026-10-08T15:00)'),
-]
+DateParam = DateLikeInput | None
 RecurrenceIdParam = typing.Annotated[
-    datetime.date | datetime.datetime | None,
+    DateLikeInput | None,
     Field(description='Экземпляр серии: recurrence_id из list_events. None = объект целиком'),
 ]
 
@@ -86,8 +82,15 @@ def domain_errors__as_tool_error[**P, R](fn: collections.abc.Callable[P, R]) -> 
             raise ToolError('Яндекс отклонил авторизацию: проверьте YANDEX_CALDAV_EMAIL и пароль приложения') from exc
         except caldav_error.DAVError as exc:
             raise ToolError(f'Ошибка CalDAV: {exc}') from exc
+        except OSError as exc:
+            # Сеть и таймауты, когда ретраи исчерпаны
+            raise ToolError(f'Нет связи с CalDAV-сервером: {exc}') from exc
 
     return wrapper
+
+
+def day__of(value: datetime.date) -> datetime.date:
+    return value.date() if isinstance(value, datetime.datetime) else value
 
 
 def client__from_context(ctx: Context) -> YandexCalendarClient:
@@ -180,12 +183,7 @@ def tools__register_read(mcp: MCPServer) -> None:
         calendar_id: CalendarIdParam = None,
     ) -> list[DayAgenda]:
         client = client__from_context(ctx)
-        if date_from is None:
-            first_day = datetime.datetime.now(client.tz).date()
-        elif isinstance(date_from, datetime.datetime):
-            first_day = date_from.date()
-        else:
-            first_day = date_from
+        first_day = day__of(date_from) if date_from is not None else datetime.datetime.now(client.tz).date()
         return client.agenda__by_days(date_from=first_day, days=days, calendar_id=calendar_id)
 
     @mcp.tool(
@@ -203,7 +201,8 @@ def tools__register_read(mcp: MCPServer) -> None:
         client = client__from_context(ctx)
         today = datetime.datetime.now(client.tz).date()
         window_start = start if start is not None else today - datetime.timedelta(days=30)
-        window_end = end if end is not None else today + datetime.timedelta(days=90)
+        # Окно считается от start, иначе start позже today+90 дал бы пустое окно
+        window_end = end if end is not None else max(today, day__of(window_start)) + datetime.timedelta(days=90)
         events = client.events__list(start=window_start, end=window_end, calendar_id=calendar_id, query=query)
         return EventList(
             events=events, count=len(events), window_start=window_start, window_end=window_end, timezone=client.tz.key
@@ -230,10 +229,10 @@ def tools__register_read(mcp: MCPServer) -> None:
         calendar_id: CalendarIdParam = None,
     ) -> list[FreeSlot]:
         client = client__from_context(ctx)
-        today = datetime.datetime.now(client.tz).date()
+        window_start = start if start is not None else datetime.datetime.now(client.tz).date()
         return client.free_slots__find(
-            start=start if start is not None else today,
-            end=end if end is not None else today,
+            start=window_start,
+            end=end if end is not None else day__of(window_start),
             min_minutes=min_minutes,
             work_start=work_start,
             work_end=work_end,
