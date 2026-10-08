@@ -1,0 +1,48 @@
+src/yandex_calendar_mcp/dto.py
+  s_4dc3fbd5101801::t_716d6587fcb015 4,7-30,123-138,141-146,154-155,160,167-168,174
+tests/test_parsing.py
+  s_4dc3fbd5101801::t_5a41835cc96817 14,19,23,54-65,187-188,190-215,270-271,285-287,291-299,302-327,356-368,389-390
+  s_4dc3fbd5101801::t_103c0b975f6699 189,300-301
+src/yandex_calendar_mcp/client.py
+  s_4dc3fbd5101801::t_33c3d6bcf6e3c0 64-68
+  s_4dc3fbd5101801::t_c9ab88b8458d15 34-40,46,474-475,477-483
+  s_4dc3fbd5101801::t_33b1cf20fb9d26 50
+  s_4dc3fbd5101801::t_e6fb40103a8eb1 47,52,55,58,69-74,81-84,87-88,201-204,209-217,234,276-277,309-310,318-319,321-324,374-376,452,455,476,515-519,521-530,534,552,554-557
+  s_4dc3fbd5101801::t_9e110570c968b6 91-93,102-103
+tests/test_recurrence_and_sync.py
+  s_4dc3fbd5101801::t_5677c54de16530 5,387-433
+  s_4dc3fbd5101801::t_9e110570c968b6 203-204
+  s_4dc3fbd5101801::t_ab2eb5598d3906 14,17,26,30-31,33,35,149-150,201,260-276,280-370,372-386
+scripts/check_write_cycle.py
+  s_4dc3fbd5101801::t_1a988a1a691a31 3-4,19-20,82-87,120-131,133,136,140-146
+  s_4dc3fbd5101801::t_d3f65b637a57bd 147,178-179
+src/yandex_calendar_mcp/server.py
+  s_4dc3fbd5101801::t_ebd47df398de9c 92-95,186,204-205,232,234-235
+  s_4dc3fbd5101801::t_2dd65e911871bb 26,55,57,85-87
+README.md
+  s_4dc3fbd5101801::t_5677c54de16530 126-127,189-193
+  s_4dc3fbd5101801::t_9a5a6cf455af94 107,118,120,123-125,163-164,175-176
+src/yandex_calendar_mcp/ical.py
+  s_4dc3fbd5101801::t_79fa8e2975c7e4 464-465
+  s_4dc3fbd5101801::t_ece73e47e62618 15,222-225,228,232-239,246-249,270
+  s_4dc3fbd5101801::t_0dd3f456fdb3b9 297,307-328,393-402,405,407,450-463,466-488,490-564
+  s_4dc3fbd5101801::t_33c3d6bcf6e3c0 489
+src/yandex_calendar_mcp/config.py
+  s_4dc3fbd5101801::t_a59302d438ed68 33-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b708738f783964461b5e61fee7aecae684be623c",
+  "prompts": {},
+  "sessions": {
+    "s_4dc3fbd5101801": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8dfdfcd4-006d-45b1-badc-12faf1fdd6c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
