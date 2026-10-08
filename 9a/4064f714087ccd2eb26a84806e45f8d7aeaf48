@@ -1,0 +1,61 @@
+.env.example
+  s_2c71a8ec26c33c::t_959822ecbdf211 1-11
+.gitignore
+  s_4dc3fbd5101801::t_de5495b9c3916e 1-13
+.python-version
+  s_2c71a8ec26c33c::t_eeec5043ffb113 1
+README.md
+  s_4dc3fbd5101801::t_d69cda120f7be1 1-195
+pyproject.toml
+  s_4dc3fbd5101801::t_4eca0cd787778d 1-59
+scripts/check_connection.py
+  s_2c71a8ec26c33c::t_6b0043cf715ec5 1-37
+scripts/check_write_cycle.py
+  s_4dc3fbd5101801::t_595af1a8317ec0 1-192
+src/yandex_calendar_mcp/__init__.py
+  s_2c71a8ec26c33c::t_7ba2ed6597d354 1-6
+src/yandex_calendar_mcp/__main__.py
+  s_2c71a8ec26c33c::t_f543b0355511f3 1-5
+src/yandex_calendar_mcp/client.py
+  s_4dc3fbd5101801::t_868912d6f21c70 1-513
+src/yandex_calendar_mcp/config.py
+  s_2c71a8ec26c33c::t_7d2289eef03188 1-45
+src/yandex_calendar_mcp/dto.py
+  s_4dc3fbd5101801::t_5082915d8714f5 1-155
+src/yandex_calendar_mcp/errors.py
+  s_4dc3fbd5101801::t_31609134064bfb 1-23
+src/yandex_calendar_mcp/ical.py
+  s_4dc3fbd5101801::t_92b935273315a9 1-417
+src/yandex_calendar_mcp/server.py
+  s_4dc3fbd5101801::t_a4c1204b598ee4 1-325
+tests/test_parsing.py
+  s_4dc3fbd5101801::t_727a07e207ab37 1-307
+tests/test_recurrence_and_sync.py
+  s_4dc3fbd5101801::t_b4b9a9852e1f64 1-257
+uv.lock
+  s_4dc3fbd5101801::t_2430780d0a7fe7 1-1668
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a4064f714087ccd2eb26a84806e45f8d7aeaf48",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    },
+    "s_4dc3fbd5101801": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8dfdfcd4-006d-45b1-badc-12faf1fdd6c1",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
