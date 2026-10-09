@@ -1,0 +1,52 @@
+tests/test_parsing.py
+  s_ee5da9c8e24f7b::t_0a43120668d3cc 494-510
+tests/test_recurrence_and_sync.py
+  s_ee5da9c8e24f7b::t_0a43120668d3cc 342-367
+tests/test_yandex_samples.py
+  s_ee5da9c8e24f7b::t_0a43120668d3cc 218,444,455-463
+  s_ee5da9c8e24f7b::t_fef803a992cc72 313,329-374,392,402,411
+  s_ee5da9c8e24f7b::t_08ea9e1e7f9d95 464-465
+CHANGELOG.md
+  s_ee5da9c8e24f7b::t_690fe14492540f 16-19
+  s_ee5da9c8e24f7b::t_06da5280fd25bf 20-23
+docs/DEVELOPMENT.md
+  s_ee5da9c8e24f7b::t_690fe14492540f 89,125-127
+src/yandex_calendar_mcp/freebusy.py
+  s_ee5da9c8e24f7b::t_0d6abb4a39e75b 87-93
+  s_ee5da9c8e24f7b::t_48ab93b88e0c06 1,16-20,97-103
+src/yandex_calendar_mcp/client.py
+  s_ee5da9c8e24f7b::t_48ab93b88e0c06 14-20,48-54,508-528,530,536-538
+  s_ee5da9c8e24f7b::t_0d6abb4a39e75b 61,379,488
+scripts/check_write_cycle.py
+  s_ee5da9c8e24f7b::t_af01bb2b6bf88a 5-6,28-29,85-114,240,243
+src/yandex_calendar_mcp/dto.py
+  s_ee5da9c8e24f7b::t_0d6abb4a39e75b 76
+  s_ee5da9c8e24f7b::t_48ab93b88e0c06 8,11,27-37,183,203,207
+README.md
+  s_ee5da9c8e24f7b::t_690fe14492540f 151
+tests/test_freebusy.py
+  s_ee5da9c8e24f7b::t_0a43120668d3cc 9-14,102-124
+  s_ee5da9c8e24f7b::t_fef803a992cc72 8,125-157
+src/yandex_calendar_mcp/server.py
+  s_ee5da9c8e24f7b::t_48ab93b88e0c06 29,285
+  s_ee5da9c8e24f7b::t_0d6abb4a39e75b 48,200,219-221,251
+src/yandex_calendar_mcp/ical.py
+  s_ee5da9c8e24f7b::t_48ab93b88e0c06 577-579,591-595
+  s_ee5da9c8e24f7b::t_0d6abb4a39e75b 62-63,67-81,89,126,187-193,197,205,208,303-309,314,316-317,319-321,326,328-331,608
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d101cbe80d0496ddf2158bef4f91e8bb50c2f61e",
+  "prompts": {},
+  "sessions": {
+    "s_ee5da9c8e24f7b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "51f292d8-21a3-48a8-b5c9-7a721132f771",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
