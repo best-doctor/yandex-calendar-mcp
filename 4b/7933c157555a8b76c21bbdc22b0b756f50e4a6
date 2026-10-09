@@ -1,0 +1,30 @@
+pyproject.toml
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 3-6,8-19,30-34,43-45,49-50
+  s_2c71a8ec26c33c::t_9da61815cafe88 37
+  s_2c71a8ec26c33c::t_02e8895e435a6b 51
+src/yandex_calendar_mcp/server.py
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 371-372,376-381
+LICENSE
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 1-21
+.github/workflows/publish.yml
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 1-62
+.github/workflows/ci.yml
+  s_2c71a8ec26c33c::t_9da61815cafe88 68-69
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 1-67,70-76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4b7933c157555a8b76c21bbdc22b0b756f50e4a6",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
