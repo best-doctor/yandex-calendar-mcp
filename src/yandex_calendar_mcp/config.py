@@ -27,6 +27,14 @@ class Settings(BaseSettings):
         description='readonly: регистрируются только тулы чтения; write: плюс создание, изменение, удаление',
     )
 
+    @field_validator('mode', mode='before')
+    @classmethod
+    def mode__empty_means_readonly(cls, value: object) -> object:
+        """Плагины и конфиги клиентов передают пустую строку, если поле не заполнено: это readonly, а не ошибка."""
+        if isinstance(value, str) and not value.strip():
+            return 'readonly'
+        return value
+
     @field_validator('tz')
     @classmethod
     def tz__must_be_known(cls, value: str) -> str:

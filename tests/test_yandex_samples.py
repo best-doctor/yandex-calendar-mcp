@@ -454,3 +454,10 @@ def test_fake_calendar_namespace_matches_caldav_shape() -> None:
     """Страховка для фикстуры: у подмены те же атрибуты, что читает клиент у caldav.Calendar."""
     cal = types.SimpleNamespace(url=YANDEX_CALENDARS['todos-5413332'].url, name='Не забыть')
     assert cal.url.endswith('todos-5413332/')
+
+
+def test_empty_mode_from_plugin_config_means_readonly() -> None:
+    """Плагин Claude Code подставляет пустую строку в незаполненное поле режима: сервер должен подняться в readonly."""
+    env = {'YANDEX_CALDAV_EMAIL': 'user@example.com', 'YANDEX_CALDAV_KEY': 'x', 'YANDEX_CALDAV_MODE': ''}
+    with mock.patch.dict(os.environ, env):
+        assert Settings(_env_file=None).mode == 'readonly'  # type: ignore[call-arg]
