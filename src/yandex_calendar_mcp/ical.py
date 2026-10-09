@@ -59,11 +59,26 @@ def mailto__strip(value: typing.Any) -> str:
     return text[7:] if text.lower().startswith('mailto:') else text
 
 
-def attendees__from_vevent(component: icalendar.Component) -> list[Attendee]:
+def attendees__raw(component: icalendar.Component) -> list[icalendar.vCalAddress]:
+    """ATTENDEE всегда списком: icalendar отдаёт одного участника значением, нескольких списком."""
     raw = component.get('ATTENDEE')
     if raw is None:
         return []
-    items = raw if isinstance(raw, list) else [raw]
+    return raw if isinstance(raw, list) else [raw]
+
+
+def emails__unique(emails: list[str]) -> list[str]:
+    """Адреса без повторов в исходном порядке. Регистр в e-mail не различается."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for email in emails:
+        if email.casefold() not in seen:
+            seen.add(email.casefold())
+            result.append(email)
+    return result
+
+
+def attendees__from_vevent(component: icalendar.Component) -> list[Attendee]:
     return [
         Attendee(
             email=mailto__strip(item),
@@ -71,7 +86,7 @@ def attendees__from_vevent(component: icalendar.Component) -> list[Attendee]:
             status=item.params.get('PARTSTAT'),
             role=item.params.get('ROLE'),
         )
-        for item in items
+        for item in attendees__raw(component)
     ]
 
 
@@ -108,6 +123,7 @@ def vevent__to_event_info(
         organizer=mailto__strip(organizer) if organizer is not None else None,
         attendees=attendees__from_vevent(component),
         recurring=component.get('RRULE') is not None or component.get('RECURRENCE-ID') is not None,
+        transparent=ical_text__get(component, 'TRANSP') == 'TRANSPARENT',
         recurrence_id=ical_value__to_timezone(component.get('RECURRENCE-ID'), tz),
         conference_url=ical_text__get(component, 'X-TELEMOST-CONFERENCE') or ical_text__get(component, 'CONFERENCE'),
         web_url=ical_text__get(component, 'URL'),
@@ -168,9 +184,17 @@ def date_like__to_date(value: DateLike) -> datetime.date:
     return value.date() if isinstance(value, datetime.datetime) else value
 
 
+def event__blocks_time(event: EventInfo, own_email: str) -> bool:
+    """Занимает ли событие время: отменённые, прозрачные и отклонённые мной встречи не занимают."""
+    if event.status == 'CANCELLED' or event.transparent:
+        return False
+    return not any(a.email.casefold() == own_email.casefold() and a.status == 'DECLINED' for a in event.attendees)
+
+
 def free_slots__between_events(
     events: list[EventInfo],
     *,
+    own_email: str,
     start: datetime.datetime,
     end: datetime.datetime,
     min_minutes: int,
@@ -178,10 +202,10 @@ def free_slots__between_events(
     work_end: datetime.time,
     tz: zoneinfo.ZoneInfo,
 ) -> list[FreeSlot]:
-    """Окна между занятыми событиями, обрезанные по рабочим часам каждого дня."""
+    """Окна между занятыми событиями, обрезанные по рабочим часам каждого дня. События на весь день не мешают."""
     busy: list[tuple[datetime.datetime, datetime.datetime]] = []
     for event in events:
-        if event.all_day or event.status == 'CANCELLED' or not isinstance(event.start, datetime.datetime):
+        if event.all_day or not isinstance(event.start, datetime.datetime) or not event__blocks_time(event, own_email):
             continue
         event_end = event.end if isinstance(event.end, datetime.datetime) else event.start + datetime.timedelta(hours=1)
         busy.append((event.start, event_end))
@@ -276,34 +300,35 @@ def attendee__build(email: str) -> icalendar.vCalAddress:
     return address
 
 
+def organizer__require_own(component: icalendar.Component, organizer: str) -> None:
+    """Участников меняет только организатор: он и рассылает приглашения. Событие без ORGANIZER считается своим."""
+    current = component.get('ORGANIZER')
+    if current is not None and mailto__strip(current).casefold() != organizer.casefold():
+        raise InvalidEventError(f'Организатор встречи {mailto__strip(current)}, менять участников может только он.')
+
+
 def vevent__add_attendees(component: icalendar.Component, emails: list[str], *, organizer: str) -> None:
     """Добавляет участников, которых ещё нет в событии.
 
     Без ORGANIZER Яндекс считает объект личным, а не встречей, и молча выбрасывает все ATTENDEE.
-    Поэтому организатором ставится свой адрес. Чужую встречу так не поменять: рассылает приглашения организатор.
+    Поэтому организатором ставится свой адрес.
     """
-    current = component.get('ORGANIZER')
-    if current is None:
+    organizer__require_own(component, organizer)
+    if component.get('ORGANIZER') is None:
         component.add('ORGANIZER', icalendar.vCalAddress(f'mailto:{organizer}'))
-    elif mailto__strip(current).casefold() != organizer.casefold():
-        raise InvalidEventError(f'Организатор встречи {mailto__strip(current)}, добавлять участников может только он.')
-    present = {attendee.email.casefold() for attendee in attendees__from_vevent(component)}
-    for email in emails:
-        if email.casefold() not in present:
-            component.add('ATTENDEE', attendee__build(email))
-            present.add(email.casefold())
+    present = [mailto__strip(attendee) for attendee in attendees__raw(component)]
+    for email in emails__unique([*present, *emails])[len(present) :]:
+        component.add('ATTENDEE', attendee__build(email))
 
 
 def vevent__remove_attendees(component: icalendar.Component, emails: list[str], *, organizer: str) -> None:
     """Убирает участников по e-mail, отсутствующих пропускает. Отмену им рассылает сервер (auto-schedule)."""
-    current = component.get('ORGANIZER')
-    if current is not None and mailto__strip(current).casefold() != organizer.casefold():
-        raise InvalidEventError(f'Организатор встречи {mailto__strip(current)}, убирать участников может только он.')
+    organizer__require_own(component, organizer)
     removed = {email.casefold() for email in emails}
-    raw = component.pop('ATTENDEE', None)
-    for attendee in raw if isinstance(raw, list) else [raw] if raw is not None else []:
-        if mailto__strip(attendee).casefold() not in removed:
-            component.add('ATTENDEE', attendee)
+    kept = [attendee for attendee in attendees__raw(component) if mailto__strip(attendee).casefold() not in removed]
+    component.pop('ATTENDEE', None)
+    for attendee in kept:
+        component.add('ATTENDEE', attendee)
 
 
 def vcalendar__wrap(component: icalendar.Component) -> icalendar.Calendar:
@@ -549,9 +574,9 @@ def vcalendar__apply_update(
 ) -> None:
     """Правка объекта: без recurrence_id мастер (вся серия), с ним один экземпляр через переопределение.
 
-    SEQUENCE мастера поднимает caldav при сохранении, SEQUENCE переопределения поднимаем сами,
-    иначе участники по RFC 5546 могут не принять обновление экземпляра.
-    Участники серии меняются и в переопределениях: у каждого экземпляра свой список участников.
+    SEQUENCE мастера поднимает caldav при сохранении, SEQUENCE переопределений поднимаем сами,
+    иначе участники по RFC 5546 могут не принять обновление экземпляра. Правка серии меняет и переопределения:
+    перенос сдвигает их RECURRENCE-ID, а участники у каждого экземпляра свои.
     """
     if dto.recurrence_id is not None:
         override = vcalendar__occurrence_for_edit(calendar, dto.recurrence_id, tz)
@@ -563,7 +588,11 @@ def vcalendar__apply_update(
         old_start = dtstart__get(master)
         vevent__apply_update(master, dto, tz)
         series__shift(calendar, old_start, dtstart__get(master))
-        edited = list(calendar.walk('VEVENT'))
+        overrides = [c for c in calendar.walk('VEVENT') if c.get('RECURRENCE-ID') is not None]
+        if dtstart__get(master) != old_start or dto.add_attendees or dto.remove_attendees:
+            for override in overrides:
+                sequence__increment(override)
+        edited = [master, *overrides]
     for component in edited:
         if dto.remove_attendees:
             vevent__remove_attendees(component, dto.remove_attendees, organizer=organizer)
@@ -576,8 +605,7 @@ def vcalendar__set_partstat(calendar: icalendar.Calendar, email: str, partstat: 
     """Ставит PARTSTAT участнику email во всех VEVENT объекта, включая переопределения экземпляров."""
     found = False
     for component in calendar.walk('VEVENT'):
-        raw = component.get('ATTENDEE')
-        for attendee in raw if isinstance(raw, list) else [raw] if raw is not None else []:
+        for attendee in attendees__raw(component):
             if mailto__strip(attendee).casefold() == email.casefold():
                 attendee.params['PARTSTAT'] = partstat
                 attendee.params.pop('RSVP', None)

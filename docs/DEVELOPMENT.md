@@ -86,7 +86,7 @@ src/yandex_calendar_mcp/
   client.py   Логика: YandexCalendarClient поверх caldav.DAVClient, backoff-ретраи
   server.py   Presentation: фабрика server__build(settings), тулы чтения всегда, записи только в write
 scripts/check_connection.py   smoke-тест чтения
-scripts/check_write_cycle.py  живой цикл создать → изменить → удалить
+scripts/check_write_cycle.py  живой цикл создать → изменить → удалить, участники на example.com
 tests/test_parsing.py         офлайн-тесты парсинга, повестки и свободных окон
 tests/test_recurrence_and_sync.py  офлайн-тесты экземпляров серии, sync и разбора HTTP-кода ошибок
 ```
@@ -122,6 +122,9 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pyt
   выбрасывает все `ATTENDEE`, дописывает свой `ORGANIZER` и отвечает успехом. Поэтому `create_event` с участниками
   и `update_event` с `add_attendees` ставят организатором свой адрес. Добавленным и убранным участникам сервер сам
   рассылает приглашения и отмены и дописывает `CN`. Веб-интерфейс показывает изменения после обновления страницы.
+- Основной календарь отдаётся свойством `schedule-default-calendar-URL` (RFC 6638) на schedule inbox. Порядок
+  календарей в списке не гарантирует, что первым будет свой: рядом лежат подписанные слои коллег. Если свойство
+  недоступно, событие уходит в первый календарь с VEVENT.
 - Занятость коллег отдаётся POST-запросом VFREEBUSY в `schedule outbox` (RFC 6638) с типами `BUSY` и
   `BUSY-TENTATIVE`. Неизвестный адрес приходит с `request-status 3.8;No authority`. Обычный free-busy REPORT
   на календарь отвечает 400. Библиотека caldav ответ outbox не разбирает, поэтому запрос и разбор в `freebusy.py`.

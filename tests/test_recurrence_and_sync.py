@@ -339,6 +339,32 @@ def test_series_attendee_change_reaches_overrides() -> None:
     assert ['ATTENDEE' in c for c in _vevents(calendar)] == [False, False]
 
 
+@pytest.mark.parametrize(
+    'dto',
+    [
+        EventUpdateDto(uid='series-1', add_attendees=['a@example.com']),
+        EventUpdateDto(uid='series-1', start=datetime.datetime(2026, 9, 23, 15, 0)),
+    ],
+    ids=['attendees', 'shift'],
+)
+def test_series_edit_bumps_sequence_of_changed_overrides(dto: EventUpdateDto) -> None:
+    """Правка серии меняет и переопределения, поэтому их SEQUENCE растёт; мастеру его поднимет caldav при сохранении."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+
+    vcalendar__apply_update(calendar, dto, MSK, organizer=ME)
+
+    assert [c['SEQUENCE'] for c in _vevents(calendar)] == [6, 7]
+
+
+def test_series_edit_without_override_changes_keeps_their_sequence() -> None:
+    """Переименование серии переопределений не трогает: их SEQUENCE остаётся прежним."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+
+    vcalendar__apply_update(calendar, EventUpdateDto(uid='series-1', summary='Новый синк'), MSK, organizer=ME)
+
+    assert [c['SEQUENCE'] for c in _vevents(calendar)] == [6, 6]
+
+
 def test_occurrence_attendee_change_touches_only_this_instance() -> None:
     """С recurrence_id участник добавляется только в переопределение этого экземпляра, мастер не меняется."""
     calendar = icalendar.Calendar.from_ical(ICS_SERIES)

@@ -1,4 +1,4 @@
-"""Запрос занятости участников через scheduling outbox (RFC 6638) и разбор ответа. Без сети."""
+"""Scheduling (RFC 6638): запрос занятости через outbox, календарь по умолчанию из inbox. Без сети."""
 
 from __future__ import annotations
 
@@ -13,6 +13,11 @@ from yandex_calendar_mcp.dto import AttendeeAvailability, BusyInterval, FreeSlot
 from yandex_calendar_mcp.ical import PRODID, free_slots__between_busy
 
 NS = {'C': 'urn:ietf:params:xml:ns:caldav', 'D': 'DAV:'}
+SCHEDULE_DEFAULT_CALENDAR_PROPFIND = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<D:propfind xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">'
+    '<D:prop><C:schedule-default-calendar-URL/></D:prop></D:propfind>'
+)
 
 
 def freebusy_request__build(
@@ -79,7 +84,20 @@ def common_free__compute(
     work_end: datetime.time,
     tz: zoneinfo.ZoneInfo,
 ) -> list[FreeSlot]:
-    busy = [(interval.start, interval.end) for attendee in attendees for interval in attendee.busy]
+    # FBTYPE=FREE по RFC 5545 это свободное время, занятость только BUSY, BUSY-TENTATIVE и BUSY-UNAVAILABLE
+    busy = [
+        (interval.start, interval.end)
+        for attendee in attendees
+        for interval in attendee.busy
+        if interval.kind.startswith('BUSY')
+    ]
     return free_slots__between_busy(
         busy, start=start, end=end, min_minutes=min_minutes, work_start=work_start, work_end=work_end, tz=tz
     )
+
+
+def schedule_default_calendar__parse(xml: str) -> str | None:
+    """href календаря по умолчанию из PROPFIND по schedule inbox, None если сервер его не отдал."""
+    root = ElementTree.fromstring(xml)
+    href = root.findtext('.//C:schedule-default-calendar-URL/D:href', default='', namespaces=NS)
+    return href.strip() or None

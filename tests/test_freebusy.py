@@ -5,7 +5,13 @@ from __future__ import annotations
 import datetime
 import zoneinfo
 
-from yandex_calendar_mcp.freebusy import common_free__compute, freebusy_request__build, schedule_response__parse
+from yandex_calendar_mcp.dto import AttendeeAvailability, BusyInterval
+from yandex_calendar_mcp.freebusy import (
+    common_free__compute,
+    freebusy_request__build,
+    schedule_default_calendar__parse,
+    schedule_response__parse,
+)
 
 MSK = zoneinfo.ZoneInfo('Europe/Moscow')
 
@@ -93,3 +99,59 @@ def test_freebusy_request_build_is_itip_request_in_utc() -> None:
     assert 'ATTENDEE:mailto:a@example.com' in body
     assert 'DTSTART:20261009T060000Z' in body
     assert 'DTEND:20261009T170000Z' in body
+
+
+# Ответ Яндекса на PROPFIND schedule-default-calendar-URL по schedule inbox: href без префикса пространства имён
+DEFAULT_CALENDAR_RESPONSE = """<?xml version='1.0' encoding='utf-8'?>
+<D:multistatus xmlns:D="DAV:"><D:response><href xmlns="DAV:">/calendars/user%40example.com/inbox/</href>\
+<D:propstat><D:prop><C:schedule-default-calendar-URL xmlns:C="urn:ietf:params:xml:ns:caldav">\
+<D:href>/calendars/user%40example.com/events-18230812/</D:href></C:schedule-default-calendar-URL></D:prop>\
+<status xmlns="DAV:">HTTP/1.1 200 OK</status></D:propstat></D:response></D:multistatus>
+"""
+
+DEFAULT_CALENDAR_MISSING = """<?xml version='1.0' encoding='utf-8'?>
+<D:multistatus xmlns:D="DAV:"><D:response><D:href>/calendars/user%40example.com/inbox/</D:href>
+<D:propstat><D:prop><C:schedule-default-calendar-URL xmlns:C="urn:ietf:params:xml:ns:caldav"/></D:prop>
+<D:status>HTTP/1.1 404 Not Found</D:status></D:propstat></D:response></D:multistatus>
+"""
+
+
+def test_schedule_default_calendar_parse() -> None:
+    """href основного календаря берётся из ответа inbox; пустое свойство (404 в propstat) даёт None."""
+    assert (
+        schedule_default_calendar__parse(DEFAULT_CALENDAR_RESPONSE) == '/calendars/user%40example.com/events-18230812/'
+    )
+    assert schedule_default_calendar__parse(DEFAULT_CALENDAR_MISSING) is None
+
+
+def test_common_free_ignores_free_periods() -> None:
+    """FBTYPE=FREE это свободное время: в общие окна оно не вычитается, BUSY-UNAVAILABLE вычитается."""
+    day = datetime.date(2026, 10, 9)
+    attendee = AttendeeAvailability(
+        email='a@example.com',
+        request_status='2.0;Success',
+        busy=[
+            BusyInterval(
+                start=datetime.datetime(2026, 10, 9, 10, tzinfo=MSK),
+                end=datetime.datetime(2026, 10, 9, 12, tzinfo=MSK),
+                kind='FREE',
+            ),
+            BusyInterval(
+                start=datetime.datetime(2026, 10, 9, 14, tzinfo=MSK),
+                end=datetime.datetime(2026, 10, 9, 15, tzinfo=MSK),
+                kind='BUSY-UNAVAILABLE',
+            ),
+        ],
+    )
+
+    slots = common_free__compute(
+        [attendee],
+        start=datetime.datetime.combine(day, datetime.time(9), tzinfo=MSK),
+        end=datetime.datetime.combine(day, datetime.time(19), tzinfo=MSK),
+        min_minutes=30,
+        work_start=datetime.time(9),
+        work_end=datetime.time(19),
+        tz=MSK,
+    )
+
+    assert [(s.start.hour, s.end.hour) for s in slots] == [(9, 14), (15, 19)]

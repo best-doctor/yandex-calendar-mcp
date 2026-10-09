@@ -11,7 +11,13 @@ import uuid
 
 import backoff
 from caldav.calendarobjectresource import CalendarObjectResource, Todo
-from caldav.collection import Calendar, Principal, ScheduleOutbox, SynchronizableCalendarObjectCollection
+from caldav.collection import (
+    Calendar,
+    Principal,
+    ScheduleInbox,
+    ScheduleOutbox,
+    SynchronizableCalendarObjectCollection,
+)
 from caldav.davclient import DAVClient
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
@@ -39,13 +45,20 @@ from yandex_calendar_mcp.errors import (
     InvalidEventError,
     SyncTokenError,
 )
-from yandex_calendar_mcp.freebusy import common_free__compute, freebusy_request__build, schedule_response__parse
+from yandex_calendar_mcp.freebusy import (
+    SCHEDULE_DEFAULT_CALENDAR_PROPFIND,
+    common_free__compute,
+    freebusy_request__build,
+    schedule_default_calendar__parse,
+    schedule_response__parse,
+)
 from yandex_calendar_mcp.ical import (
     DateLike,
     calendar_id__from_url,
     date_like__to_date,
     date_like__to_datetime,
     dtstart__get,
+    emails__unique,
     events__by_days,
     events__filter_by_text,
     events__from_icalendar,
@@ -363,6 +376,7 @@ class YandexCalendarClient:
         events = self.events__list(start=start_dt, end=end_dt, calendar_id=calendar_id, expand=True)
         return free_slots__between_events(
             events,
+            own_email=self.settings.email,
             start=start_dt,
             end=end_dt,
             min_minutes=min_minutes,
@@ -471,7 +485,7 @@ class YandexCalendarClient:
 
         Запрос без побочных эффектов: уведомления участникам не уходят. Свой адрес добавляется автоматически.
         """
-        emails = list(dict.fromkeys([self.settings.email, *attendees]))
+        emails = emails__unique([self.settings.email, *attendees])
         body = freebusy_request__build(organizer=self.settings.email, attendees=emails, start=start, end=end)
         parsed = schedule_response__parse(self.outbox__post(body), tz=self.tz)
         return AvailabilityResult(
@@ -491,13 +505,37 @@ class YandexCalendarClient:
         )
 
     # ---------------------------------------------------------------- запись
+    @retry_on_transient_error
+    def schedule_default_calendar__fetch(self) -> str | None:
+        inbox = typing.cast(ScheduleInbox, self.principal.schedule_inbox())
+        response = self.dav.propfind(str(inbox.url), SCHEDULE_DEFAULT_CALENDAR_PROPFIND, depth=0)
+        if response.status != 207:
+            raise caldav_error.PropfindError(f'schedule inbox answered {response.status}')
+        raw = response.raw
+        href = schedule_default_calendar__parse(raw if isinstance(raw, str) else raw.decode('utf-8', 'replace'))
+        return calendar_id__from_url(href) if href is not None else None
+
+    @functools.cached_property
+    def default_event_calendar_id(self) -> str | None:
+        """Основной календарь пользователя (schedule-default-calendar-URL). Первый в списке бывает чужим слоем."""
+        try:
+            return self.schedule_default_calendar__fetch()
+        except caldav_error.AuthorizationError:
+            raise
+        except (caldav_error.DAVError, OSError) as exc:
+            log.warning('default calendar lookup failed, using first VEVENT calendar: %s', exc)
+            return None
+
     def calendar__for_write(self, calendar_id: str | None, *, component: str) -> Calendar:
-        """Явный календарь, иначе первый, который поддерживает нужный компонент.
+        """Явный календарь, для события основной календарь пользователя, иначе первый с нужным компонентом.
 
         У Яндекса события и задачи живут в разных коллекциях (events-* только VEVENT, todos-* только VTODO).
         """
         if calendar_id is not None:
             return self.calendar__get(calendar_id)
+        default_id = self.default_event_calendar_id if component == 'VEVENT' else None
+        if default_id is not None and component in self.components_by_calendar_id.get(default_id, []):
+            return self.calendars_by_id[default_id]
         for cal_id, components in self.components_by_calendar_id.items():
             if component in components:
                 return self.calendars_by_id[cal_id]

@@ -5,9 +5,10 @@ import re
 import typing
 
 import icalendar
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 DATE_ONLY_PATTERN = re.compile(r'\d{4}-\d{2}-\d{2}')
+EMAIL_PATTERN = re.compile(r'[^@\s]+@[^@\s]+\.[^@\s]+')
 
 
 def date_like__parse(value: typing.Any) -> typing.Any:
@@ -21,6 +22,17 @@ def date_like__parse(value: typing.Any) -> typing.Any:
     if DATE_ONLY_PATTERN.fullmatch(text):
         return datetime.date.fromisoformat(text)
     return datetime.datetime.fromisoformat(text)
+
+
+def email__validate(value: str) -> str:
+    """Имя вместо адреса ушло бы в ATTENDEE как mailto:Имя, и Яндекс молча выбросил бы такого участника."""
+    text = value.strip()
+    if not EMAIL_PATTERN.fullmatch(text):
+        raise ValueError(f'{value!r} не e-mail: нужен полный адрес вида login@luchi.ru, а не имя или логин')
+    return text
+
+
+Email = typing.Annotated[str, AfterValidator(email__validate)]
 
 
 DateLikeInput = typing.Annotated[
@@ -61,6 +73,7 @@ class EventInfo(BaseDto):
     organizer: str | None = None
     attendees: list[Attendee] = Field(default_factory=list)
     recurring: bool = False
+    transparent: bool = Field(default=False, description='TRANSP:TRANSPARENT: событие не занимает время')
     recurrence_id: datetime.datetime | datetime.date | None = Field(
         default=None,
         description='Заполнено для экземпляра повторяющегося события',
@@ -167,7 +180,7 @@ class EventCreateDto(BaseDto):
     duration_minutes: int | None = Field(default=None, ge=1, description='Альтернатива end. По умолчанию 60 минут')
     description: str | None = None
     location: str | None = None
-    attendees: list[str] = Field(default_factory=list, description='E-mail участников')
+    attendees: list[Email] = Field(default_factory=list, description='E-mail участников')
     rrule: str | None = Field(default=None, description='Правило повтора RFC 5545, например FREQ=WEEKLY;COUNT=5')
     calendar_id: str | None = Field(default=None, description='Из list_calendars. None = первый календарь')
 
@@ -187,11 +200,11 @@ class EventUpdateDto(BaseDto):
     start: DateLikeInput | None = None
     end: DateLikeInput | None = Field(default=None, description='Для события на весь день end не включается')
     status: EventStatus | None = None
-    add_attendees: list[str] = Field(
+    add_attendees: list[Email] = Field(
         default_factory=list,
         description='E-mail новых участников, им уйдут приглашения. Уже приглашённые пропускаются',
     )
-    remove_attendees: list[str] = Field(
+    remove_attendees: list[Email] = Field(
         default_factory=list, description='E-mail участников, которых убрать из встречи, им уйдёт отмена'
     )
 

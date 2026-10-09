@@ -26,6 +26,7 @@ from yandex_calendar_mcp.dto import (
     ConnectionInfo,
     DateLikeInput,
     DayAgenda,
+    Email,
     EventCreateDto,
     EventInfo,
     EventList,
@@ -44,7 +45,7 @@ from yandex_calendar_mcp.errors import (
     InvalidEventError,
     SyncTokenError,
 )
-from yandex_calendar_mcp.ical import date_like__to_datetime
+from yandex_calendar_mcp.ical import date_like__to_date, date_like__to_datetime
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
@@ -89,10 +90,6 @@ def domain_errors__as_tool_error[**P, R](fn: collections.abc.Callable[P, R]) -> 
             raise ToolError(f'Нет связи с CalDAV-сервером: {exc}') from exc
 
     return wrapper
-
-
-def day__of(value: datetime.date) -> datetime.date:
-    return value.date() if isinstance(value, datetime.datetime) else value
 
 
 def client__from_context(ctx: Context) -> YandexCalendarClient:
@@ -200,7 +197,7 @@ def tools__register_read(mcp: MCPServer) -> None:
         calendar_id: CalendarIdParam = None,
     ) -> list[DayAgenda]:
         client = client__from_context(ctx)
-        first_day = day__of(date_from) if date_from is not None else datetime.datetime.now(client.tz).date()
+        first_day = date_like__to_date(date_from) if date_from is not None else datetime.datetime.now(client.tz).date()
         return client.agenda__by_days(date_from=first_day, days=days, calendar_id=calendar_id)
 
     @mcp.tool(
@@ -219,7 +216,9 @@ def tools__register_read(mcp: MCPServer) -> None:
         today = datetime.datetime.now(client.tz).date()
         window_start = start if start is not None else today - datetime.timedelta(days=30)
         # Окно считается от start, иначе start позже today+90 дал бы пустое окно
-        window_end = end if end is not None else max(today, day__of(window_start)) + datetime.timedelta(days=90)
+        window_end = (
+            end if end is not None else max(today, date_like__to_date(window_start)) + datetime.timedelta(days=90)
+        )
         events = client.events__list(start=window_start, end=window_end, calendar_id=calendar_id, query=query)
         return EventList(
             events=events, count=len(events), window_start=window_start, window_end=window_end, timezone=client.tz.key
@@ -249,7 +248,7 @@ def tools__register_read(mcp: MCPServer) -> None:
         window_start = start if start is not None else datetime.datetime.now(client.tz).date()
         return client.free_slots__find(
             start=window_start,
-            end=end if end is not None else day__of(window_start),
+            end=end if end is not None else date_like__to_date(window_start),
             min_minutes=min_minutes,
             work_start=work_start,
             work_end=work_end,
@@ -283,7 +282,7 @@ def tools__register_read(mcp: MCPServer) -> None:
     @domain_errors__as_tool_error
     def check_availability(
         ctx: Context,
-        attendees: typing.Annotated[list[str], Field(min_length=1, description='E-mail участников')],
+        attendees: typing.Annotated[list[Email], Field(min_length=1, description='E-mail участников')],
         start: DateParam = None,
         end: DateParam = None,
         min_minutes: typing.Annotated[int, Field(ge=5, le=480)] = 30,

@@ -2,7 +2,8 @@
 
 Для серии дополнительно проверяются правка и удаление одного экземпляра, перенос всей серии
 и sync-token до и после удаления.
-Тестовые объекты ставятся на 03:00 завтрашнего дня, без участников, чтобы никому не улетели приглашения.
+Тестовые объекты ставятся на 03:00 завтрашнего дня. Участники только на example.com, чтобы приглашения
+не ушли живым людям.
 Удаление выполняется в finally, чтобы не оставить мусор при падении посередине.
 """
 
@@ -24,6 +25,8 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(messag
 logging.getLogger('caldav').setLevel(logging.ERROR)
 
 MARKER = 'MCP write-test'
+# Домен example.com зарезервирован (RFC 2606): приглашения на эти адреса никому не доставляются
+GUESTS = ['mcp-guest-1@example.com', 'mcp-guest-2@example.com']
 # Дельта sync-collection у Яндекса отстаёт: создание видно через 3–15 с, удаление через 40–90 с
 SYNC_WAIT_SECONDS = 180
 
@@ -77,6 +80,36 @@ def check_event(client: YandexCalendarClient) -> None:
         print('[event] confirmed gone')
     else:
         raise AssertionError('event still exists after delete')
+
+
+def check_attendees(client: YandexCalendarClient) -> None:
+    """Участники при создании, добавление и удаление. Без ORGANIZER Яндекс молча выбрасывал ATTENDEE."""
+    tomorrow = datetime.datetime.now(client.tz).date() + datetime.timedelta(days=1)
+    start = datetime.datetime.combine(tomorrow, datetime.time(3, 0), tzinfo=client.tz)
+    created = client.event__create(
+        EventCreateDto(summary=f'{MARKER} участники', start=start, duration_minutes=15, attendees=GUESTS[:1])
+    )
+    print(f'[attendees] created uid={created.uid} cal={created.calendar_id}')
+    try:
+        if created.calendar_id != client.default_event_calendar_id:
+            raise AssertionError(f'event went to {created.calendar_id}, not to {client.default_event_calendar_id}')
+        fetched = client.event__get(created.uid, calendar_id=created.calendar_id)
+        print(f'[attendees] read back: organizer={fetched.organizer} {[a.email for a in fetched.attendees]}')
+        if fetched.organizer != client.settings.email or [a.email for a in fetched.attendees] != GUESTS[:1]:
+            raise AssertionError('attendee dropped on create')
+
+        client.event__update(
+            EventUpdateDto(
+                uid=created.uid, calendar_id=created.calendar_id, add_attendees=GUESTS[1:], remove_attendees=GUESTS[:1]
+            )
+        )
+        fetched = client.event__get(created.uid, calendar_id=created.calendar_id)
+        print(f'[attendees] after add/remove: {[a.email for a in fetched.attendees]}')
+        if [a.email for a in fetched.attendees] != GUESTS[1:]:
+            raise AssertionError('add_attendees/remove_attendees not applied')
+    finally:
+        client.event__delete(created.uid, calendar_id=created.calendar_id)
+        print('[attendees] deleted')
 
 
 def series__instances(
@@ -204,9 +237,10 @@ def main() -> int:
         return 2
     client = YandexCalendarClient(settings)
     check_event(client)
+    check_attendees(client)
     check_series_and_sync(client)
     check_todo(client)
-    print('OK: write cycle for event, series and todo passed')
+    print('OK: write cycle for event, attendees, series and todo passed')
     return 0
 
 

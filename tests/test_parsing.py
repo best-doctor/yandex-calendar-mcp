@@ -491,3 +491,20 @@ def test_attendees_of_foreign_meeting_are_not_changed(change: typing.Callable[..
     with pytest.raises(InvalidEventError, match=r'boss@example\.com'):
         change(component, ['new@example.com'], organizer=ME)
     assert len(attendees__from_vevent(component)) == 2
+
+
+@pytest.mark.parametrize('raw', ['an nikitin', 'Антон Никитин', 'an.nikitin', 'a@b', 'a b@example.com'])
+def test_attendee_name_instead_of_email_is_rejected(raw: str) -> None:
+    """Имя или логин вместо адреса отклоняются на входе: иначе ушли бы в ATTENDEE, и Яндекс молча их выбросил бы."""
+    with pytest.raises(pydantic.ValidationError, match='не e-mail'):
+        EventCreateDto(summary='x', start=datetime.date(2026, 10, 10), attendees=[raw])
+    with pytest.raises(pydantic.ValidationError, match='не e-mail'):
+        EventUpdateDto(uid='u', add_attendees=[raw])
+
+
+def test_attendee_email_is_stripped() -> None:
+    """Пробелы вокруг адреса убираются, сам адрес не меняется."""
+    dto = EventUpdateDto(uid='u', add_attendees=[' an.nikitin@luchi.ru '], remove_attendees=['a.derut@luchi.ru'])
+
+    assert dto.add_attendees == ['an.nikitin@luchi.ru']
+    assert dto.remove_attendees == ['a.derut@luchi.ru']

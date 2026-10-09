@@ -215,6 +215,7 @@ def client() -> YandexCalendarClient:
     with mock.patch('yandex_calendar_mcp.client.DAVClient'):
         instance = YandexCalendarClient(settings)
     instance.__dict__['calendars_by_id'] = dict(YANDEX_CALENDARS)
+    instance.__dict__['default_event_calendar_id'] = None
     return instance
 
 
@@ -309,6 +310,7 @@ def test_free_slots_on_a_real_busy_day() -> None:
 
     slots = free_slots__between_events(
         events,
+        own_email='user@example.com',
         start=datetime.datetime.combine(day, datetime.time(0), tzinfo=MSK),
         end=datetime.datetime.combine(day + datetime.timedelta(days=1), datetime.time(0), tzinfo=MSK),
         min_minutes=30,
@@ -321,6 +323,52 @@ def test_free_slots_on_a_real_busy_day() -> None:
         ('09:00', '10:00'),
         ('11:00', '12:30'),
         ('17:30', '18:30'),
+    ]
+
+
+def test_declined_and_transparent_events_do_not_block_free_slots() -> None:
+    """Отклонённая мной встреча и событие TRANSP:TRANSPARENT не занимают время, отклонение коллеги не в счёт."""
+    day = datetime.date(2026, 10, 9)
+    ics = """BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:test
+BEGIN:VEVENT
+UID:declined
+DTSTART;TZID=Europe/Moscow:20261009T100000
+DTEND;TZID=Europe/Moscow:20261009T110000
+ORGANIZER:mailto:boss@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:User@Example.com
+END:VEVENT
+BEGIN:VEVENT
+UID:free
+DTSTART;TZID=Europe/Moscow:20261009T120000
+DTEND;TZID=Europe/Moscow:20261009T130000
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:colleague-declined
+DTSTART;TZID=Europe/Moscow:20261009T150000
+DTEND;TZID=Europe/Moscow:20261009T160000
+ORGANIZER:mailto:user@example.com
+ATTENDEE;PARTSTAT=DECLINED:mailto:colleague@example.com
+END:VEVENT
+END:VCALENDAR
+"""
+
+    slots = free_slots__between_events(
+        _event(ics),
+        own_email='user@example.com',
+        start=datetime.datetime.combine(day, datetime.time(9), tzinfo=MSK),
+        end=datetime.datetime.combine(day, datetime.time(19), tzinfo=MSK),
+        min_minutes=30,
+        work_start=datetime.time(9),
+        work_end=datetime.time(19),
+        tz=MSK,
+    )
+
+    assert [(s.start.strftime('%H:%M'), s.end.strftime('%H:%M')) for s in slots] == [
+        ('09:00', '15:00'),
+        ('16:00', '19:00'),
     ]
 
 
@@ -341,7 +389,7 @@ def test_schedule_response_with_unknown_address_and_multi_period_line() -> None:
 
 
 def test_availability_check_adds_own_address_once(client: YandexCalendarClient) -> None:
-    """Свой адрес попадает в запрос первым и один раз, даже если передан явно; общие окна учитывают всех."""
+    """Свой адрес попадает в запрос первым и один раз, даже если передан явно в другом регистре."""
     day = datetime.date(2026, 10, 9)
     sent: list[str] = []
 
@@ -351,7 +399,7 @@ def test_availability_check_adds_own_address_once(client: YandexCalendarClient) 
 
     with mock.patch.object(client, 'outbox__post', side_effect=fake_post):
         result = client.availability__check(
-            attendees=['colleague@example.com', 'user@example.com', 'nobody@example.com'],
+            attendees=['colleague@example.com', 'USER@example.com', 'nobody@example.com'],
             start=datetime.datetime.combine(day, datetime.time(9), tzinfo=MSK),
             end=datetime.datetime.combine(day, datetime.time(20), tzinfo=MSK),
             min_minutes=30,
@@ -360,6 +408,7 @@ def test_availability_check_adds_own_address_once(client: YandexCalendarClient) 
         )
 
     assert sent[0].count('ATTENDEE:mailto:user@example.com') == 1
+    assert 'USER@example.com' not in sent[0]
     assert sent[0].index('mailto:user@example.com') < sent[0].index('mailto:colleague@example.com')
     assert [(s.start.strftime('%H:%M'), s.end.strftime('%H:%M')) for s in result.common_free] == [
         ('09:00', '09:30'),
@@ -392,7 +441,7 @@ def test_todos_query_only_hits_todo_collection(client: YandexCalendarClient) -> 
 
 
 def test_calendar_for_write_picks_collection_by_component(client: YandexCalendarClient) -> None:
-    """Событие без calendar_id уходит в первый VEVENT-календарь, задача в todos-*."""
+    """Без основного календаря событие уходит в первый VEVENT-календарь, задача в todos-*."""
     assert str(client.calendar__for_write(None, component='VEVENT').url).endswith('events-18230812/')
     assert str(client.calendar__for_write(None, component='VTODO').url).endswith('todos-5413332/')
     assert str(client.calendar__for_write('Команда', component='VEVENT').url).endswith('events-37309973/')
@@ -401,6 +450,17 @@ def test_calendar_for_write_picks_collection_by_component(client: YandexCalendar
     client.__dict__.pop('components_by_calendar_id', None)
     with pytest.raises(CalendarNotFoundError):
         client.calendar__for_write(None, component='VTODO')
+
+
+def test_event_without_calendar_id_goes_to_default_calendar(client: YandexCalendarClient) -> None:
+    """Событие без calendar_id уходит в основной календарь из schedule inbox, даже если первым идёт чужой слой."""
+    client.__dict__['default_event_calendar_id'] = 'events-37309973'
+
+    assert str(client.calendar__for_write(None, component='VEVENT').url).endswith('events-37309973/')
+    assert str(client.calendar__for_write(None, component='VTODO').url).endswith('todos-5413332/')
+
+    client.__dict__['default_event_calendar_id'] = 'events-404'
+    assert str(client.calendar__for_write(None, component='VEVENT').url).endswith('events-18230812/')
 
 
 def test_principal_falls_back_to_documented_path(client: YandexCalendarClient) -> None:
