@@ -1,0 +1,21 @@
+CHANGELOG.md
+  s_4c4feb86575324::t_b7d02f68cc6e8c 8-9
+src/yandex_calendar_mcp/__init__.py
+  s_4c4feb86575324::t_47926e5762dd67 6
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1b172bd473b266a0bf9d45f4912d22a1c6079515",
+  "prompts": {},
+  "sessions": {
+    "s_4c4feb86575324": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "05c25c34-c94e-48b1-a06d-aa10d3f9993d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
