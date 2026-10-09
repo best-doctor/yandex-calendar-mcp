@@ -1,0 +1,19 @@
+README.md
+  s_2c71a8ec26c33c::t_f4b7277099154e 74-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a90693cc0ae8563df914c2ef32ed07da83643500",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "unknown"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
