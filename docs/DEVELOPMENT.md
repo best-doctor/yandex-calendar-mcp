@@ -83,6 +83,7 @@ src/yandex_calendar_mcp/
   errors.py   Доменные ошибки
   ical.py     Чистые функции: VEVENT/VTODO ↔ DTO, сборка объектов для PUT, нормализация дат, свободные окна
   freebusy.py Чистые функции: запрос VFREEBUSY в outbox и разбор schedule-response
+  people.py   Чистые функции: запрос principal-property-search и разбор найденных людей
   client.py   Логика: YandexCalendarClient поверх caldav.DAVClient, backoff-ретраи
   server.py   Presentation: фабрика server__build(settings), тулы чтения всегда, записи только в write
 scripts/check_connection.py   smoke-тест чтения
@@ -149,6 +150,10 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pyt
 - `COUNT` в RRULE Яндекс переписывает в `UNTIL`.
 - На удалённый URL calendar-multiget отвечает 404, caldav при этом создаёт объект с `data=None`.
   Ещё multiget собирает URL с `@` вместо `%40`, поэтому в ответе sync URL берётся из дельты, как в `list_events`.
+- Людей организации сервер ищет отчётом `principal-property-search` (RFC 3744) по `/principals/`: подстрока
+  в `displayname` или `calendar-user-address-set`, без учёта регистра, 0,1–0,2 с. Латинская фамилия находится через
+  логин в адресе. Адрес приходит в основном домене организации (`bestdoctor.ru` вместо `luchi.ru`): это алиас того же
+  ящика, free-busy по обоим совпадает. `supported-report-set` этот отчёт не объявляет, но он работает.
 - Свойство `URL` у Яндекса это ссылка на событие в веб-календаре, она отдаётся как `web_url`. Ссылка на звонок
   у сторонних сервисов (ktalk, Zoom) лежит в `LOCATION` или `DESCRIPTION`; `conference_url` заполняется
   только из `X-TELEMOST-CONFERENCE`/`CONFERENCE`.

@@ -33,6 +33,7 @@ from yandex_calendar_mcp.dto import (
     EventUpdateDto,
     FreeSlot,
     InviteResponse,
+    PeopleList,
     SyncResult,
     TodoCreateDto,
     TodoList,
@@ -114,6 +115,7 @@ def server__build(settings: Settings) -> MCPServer:
             'всегда вызывай check_availability для всех участников на нужный слот. Если у кого-то есть пересечение '
             '(BUSY или BUSY-TENTATIVE), не ставь встречу молча: покажи пересечения и общие свободные окна '
             'и уточни у пользователя. '
+            'Адрес участника по имени или фамилии бери из find_people, а не угадывай. '
             f'Режим: {settings.mode}.'
         ),
         lifespan=lifespan,
@@ -270,6 +272,22 @@ def tools__register_read(mcp: MCPServer) -> None:
         sync_token: typing.Annotated[str | None, Field(description='Токен из прошлого ответа sync_changes')] = None,
     ) -> SyncResult:
         return client__from_context(ctx).sync__changes(calendar_id, sync_token=sync_token)
+
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description=(
+            'Найти людей организации по подстроке имени, фамилии, логина или e-mail, кириллицей или латиницей. '
+            'Один запрос к справочнику Яндекса. Нужен, чтобы узнать адрес участника для check_availability '
+            'и create_event.'
+        ),
+    )
+    @domain_errors__as_tool_error
+    def find_people(
+        ctx: Context,
+        query: typing.Annotated[str, Field(min_length=2)],
+        limit: typing.Annotated[int, Field(ge=1, le=50)] = 10,
+    ) -> PeopleList:
+        return client__from_context(ctx).people__search(query, limit=limit)
 
     @mcp.tool(
         annotations=READ_ONLY,

@@ -34,6 +34,7 @@ from yandex_calendar_mcp.dto import (
     EventUpdateDto,
     FreeSlot,
     InviteResponse,
+    PeopleList,
     SyncResult,
     TodoCreateDto,
     TodoInfo,
@@ -74,6 +75,7 @@ from yandex_calendar_mcp.ical import (
     vtodo__mark_completed,
     vtodo__to_todo_info,
 )
+from yandex_calendar_mcp.people import people_search__build, people_search__parse
 
 log = logging.getLogger(__name__)
 
@@ -563,6 +565,23 @@ class YandexCalendarClient:
                 tz=self.tz,
             ),
         )
+
+    # ---------------------------------------------------------------- люди
+    @retry_on_transient_error
+    def people__search(self, query: str, *, limit: int) -> PeopleList:
+        """Люди организации по подстроке имени или адреса одним REPORT по /principals/ (RFC 3744).
+
+        Яндекс ищет по справочнику организации и отдаёт адрес в её основном домене.
+        """
+        url = f'{str(self.settings.url).rstrip("/")}/principals/'
+        headers = {'Depth': '0', 'Content-Type': 'application/xml; charset=utf-8'}
+        response = self.dav.request(url, 'REPORT', people_search__build(query), headers)
+        if response.status != 207:
+            # Текст в формате "502 Bad Gateway": по нему retry_on_transient_error отличает 5xx от 4xx
+            raise caldav_error.ReportError(f'principal-property-search: {response.status} {response.reason}')
+        raw = response.raw
+        people = people_search__parse(raw if isinstance(raw, str) else raw.decode('utf-8', 'replace'))
+        return PeopleList(people=people[:limit], count=len(people), truncated=len(people) > limit)
 
     # ---------------------------------------------------------------- запись
     @retry_on_transient_error

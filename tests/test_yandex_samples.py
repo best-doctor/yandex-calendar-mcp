@@ -14,11 +14,12 @@ from caldav.lib import error as caldav_error
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import SecretStr
 
-from yandex_calendar_mcp.client import YandexCalendarClient
+from yandex_calendar_mcp.client import YandexCalendarClient, caldav_error__is_permanent
 from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.errors import CalendarNotFoundError, EventNotFoundError
 from yandex_calendar_mcp.freebusy import schedule_response__parse
 from yandex_calendar_mcp.ical import events__from_icalendar, free_slots__between_events, vtodo__to_todo_info
+from yandex_calendar_mcp.people import people_search__build, people_search__parse
 from yandex_calendar_mcp.server import domain_errors__as_tool_error
 
 MSK = zoneinfo.ZoneInfo('Europe/Moscow')
@@ -521,3 +522,61 @@ def test_empty_mode_from_plugin_config_means_readonly() -> None:
     env = {'YANDEX_CALDAV_EMAIL': 'user@example.com', 'YANDEX_CALDAV_KEY': 'x', 'YANDEX_CALDAV_MODE': ''}
     with mock.patch.dict(os.environ, env):
         assert Settings(_env_file=None).mode == 'readonly'  # type: ignore[call-arg]
+
+
+# Ответ Яндекса на principal-property-search: href в пространстве DAV: без префикса, адрес в основном домене
+PEOPLE_SEARCH_RESPONSE = """<?xml version='1.0' encoding='utf-8'?>
+<D:multistatus xmlns:D="DAV:"><D:response><href xmlns="DAV:">/addressbook/i.petrov%40example.com/</href><D:propstat>\
+<D:prop><D:displayname>Иван Петров</D:displayname><C:calendar-user-address-set \
+xmlns:C="urn:ietf:params:xml:ns:caldav"><D:href>mailto:I.Petrov@example.com</D:href></C:calendar-user-address-set>\
+</D:prop><status xmlns="DAV:">HTTP/1.1 200 OK</status></D:propstat></D:response><D:response>\
+<href xmlns="DAV:">/addressbook/p.ivanov%40example.com/</href><D:propstat><D:prop><D:displayname>Пётр Иванов\
+</D:displayname><C:calendar-user-address-set xmlns:C="urn:ietf:params:xml:ns:caldav"><D:href>/principals/x/</D:href>\
+<D:href>mailto:p.ivanov@example.com</D:href></C:calendar-user-address-set></D:prop><status xmlns="DAV:">HTTP/1.1 200 OK\
+</status></D:propstat></D:response><D:response><href xmlns="DAV:">/addressbook/room/</href><D:propstat><D:prop>\
+<D:displayname>Переговорка</D:displayname></D:prop><status xmlns="DAV:">HTTP/1.1 200 OK</status></D:propstat>\
+</D:response></D:multistatus>"""
+
+
+def test_people_search_parse_takes_mailto_and_skips_entries_without_it() -> None:
+    """Адрес берётся из mailto в нижнем регистре, запись без mailto пропускается."""
+    people = people_search__parse(PEOPLE_SEARCH_RESPONSE)
+
+    assert [(p.name, p.email) for p in people] == [
+        ('Иван Петров', 'i.petrov@example.com'),
+        ('Пётр Иванов', 'p.ivanov@example.com'),
+    ]
+
+
+def test_people_search_build_escapes_query_and_matches_name_and_address() -> None:
+    body = people_search__build('  a<b&c  ')
+
+    assert body.count('<D:match>a&lt;b&amp;c</D:match>') == 2
+    assert 'test="anyof"' in body
+    assert '<D:prop><D:displayname/></D:prop>' in body
+    assert '<D:prop><C:calendar-user-address-set/></D:prop>' in body
+
+
+def test_people_search_sends_one_report_to_principals_and_applies_limit(client: YandexCalendarClient) -> None:
+    """Один REPORT по /principals/, без перебора справочника; count показывает всех найденных."""
+    response = types.SimpleNamespace(status=207, reason='Multi-Status', raw=PEOPLE_SEARCH_RESPONSE)
+    with mock.patch.object(client, 'dav') as dav:
+        dav.request.return_value = response
+        result = client.people__search('иван', limit=1)
+
+    dav.request.assert_called_once()
+    url, method, body, headers = dav.request.call_args.args
+    assert (url, method, headers['Depth']) == ('https://caldav.yandex.ru/principals/', 'REPORT', '0')
+    assert '<D:match>иван</D:match>' in body
+    assert [p.email for p in result.people] == ['i.petrov@example.com']
+    assert (result.count, result.truncated) == (2, True)
+
+
+def test_people_search_error_status_is_retryable_for_5xx_only(client: YandexCalendarClient) -> None:
+    unwrapped = YandexCalendarClient.people__search.__wrapped__  # type: ignore[attr-defined]
+    for status, reason, permanent in [(502, 'Bad Gateway', False), (400, 'Bad Request', True)]:
+        with mock.patch.object(client, 'dav') as dav:
+            dav.request.return_value = types.SimpleNamespace(status=status, reason=reason, raw='')
+            with pytest.raises(caldav_error.ReportError) as exc_info:
+                unwrapped(client, 'иван', limit=10)
+        assert caldav_error__is_permanent(exc_info.value) is permanent

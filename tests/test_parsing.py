@@ -242,6 +242,7 @@ READ_TOOLS = {
     'list_todos',
     'find_free_slots',
     'check_availability',
+    'find_people',
 }
 WRITE_TOOLS = {
     'create_event',

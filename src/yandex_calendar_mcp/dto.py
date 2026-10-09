@@ -127,6 +127,17 @@ class AvailabilityResult(BaseDto):
     common_free: list[FreeSlot] = Field(description='Окна, свободные у всех участников')
 
 
+class Person(BaseDto):
+    name: str | None = None
+    email: str = Field(description='Адрес для attendees в check_availability, create_event и update_event')
+
+
+class PeopleList(BaseDto):
+    people: list[Person]
+    count: int = Field(description='Сколько людей нашёл сервер, до обрезки по limit')
+    truncated: bool = Field(description='Найдено больше limit: уточните запрос')
+
+
 class EventList(BaseDto):
     events: list[EventInfo]
     count: int
