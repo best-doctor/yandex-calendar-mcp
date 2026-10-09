@@ -525,7 +525,7 @@ class YandexCalendarClient:
     def event__create(self, dto: EventCreateDto) -> WriteResult:
         cal = self.calendar__for_write(dto.calendar_id, component='VEVENT')
         uid = str(uuid.uuid4())
-        ical = vevent__build(dto, uid=uid, tz=self.tz).to_ical().decode()
+        ical = vevent__build(dto, uid=uid, tz=self.tz, organizer=self.settings.email).to_ical().decode()
         obj = self.object__add(cal, ical=ical, todo=False)
         return WriteResult(action='created', uid=uid, calendar_id=calendar_id__from_url(str(cal.url)), url=str(obj.url))
 
@@ -535,7 +535,7 @@ class YandexCalendarClient:
         with obj.edit_icalendar_instance() as calendar:
             master = vcalendar__master(calendar)
             old_start = dtstart__get(master)
-            vcalendar__apply_update(calendar, dto, self.tz)
+            vcalendar__apply_update(calendar, dto, self.tz, organizer=self.settings.email)
             if dto.recurrence_id is None and dtstart__get(master) != old_start and exdates__get(master):
                 # Проверено на живом аккаунте: при переносе серии Яндекс выбрасывает все EXDATE, удалённые экземпляры
                 # воскресают, а повторный PUT с EXDATE он отбивает 504. Отказываем до записи, объект не меняется

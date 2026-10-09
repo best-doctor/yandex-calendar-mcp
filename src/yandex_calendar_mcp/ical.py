@@ -276,6 +276,36 @@ def attendee__build(email: str) -> icalendar.vCalAddress:
     return address
 
 
+def vevent__add_attendees(component: icalendar.Component, emails: list[str], *, organizer: str) -> None:
+    """Добавляет участников, которых ещё нет в событии.
+
+    Без ORGANIZER Яндекс считает объект личным, а не встречей, и молча выбрасывает все ATTENDEE.
+    Поэтому организатором ставится свой адрес. Чужую встречу так не поменять: рассылает приглашения организатор.
+    """
+    current = component.get('ORGANIZER')
+    if current is None:
+        component.add('ORGANIZER', icalendar.vCalAddress(f'mailto:{organizer}'))
+    elif mailto__strip(current).casefold() != organizer.casefold():
+        raise InvalidEventError(f'Организатор встречи {mailto__strip(current)}, добавлять участников может только он.')
+    present = {attendee.email.casefold() for attendee in attendees__from_vevent(component)}
+    for email in emails:
+        if email.casefold() not in present:
+            component.add('ATTENDEE', attendee__build(email))
+            present.add(email.casefold())
+
+
+def vevent__remove_attendees(component: icalendar.Component, emails: list[str], *, organizer: str) -> None:
+    """Убирает участников по e-mail, отсутствующих пропускает. Отмену им рассылает сервер (auto-schedule)."""
+    current = component.get('ORGANIZER')
+    if current is not None and mailto__strip(current).casefold() != organizer.casefold():
+        raise InvalidEventError(f'Организатор встречи {mailto__strip(current)}, убирать участников может только он.')
+    removed = {email.casefold() for email in emails}
+    raw = component.pop('ATTENDEE', None)
+    for attendee in raw if isinstance(raw, list) else [raw] if raw is not None else []:
+        if mailto__strip(attendee).casefold() not in removed:
+            component.add('ATTENDEE', attendee)
+
+
 def vcalendar__wrap(component: icalendar.Component) -> icalendar.Calendar:
     calendar = icalendar.Calendar()
     calendar.add('PRODID', PRODID)
@@ -285,7 +315,7 @@ def vcalendar__wrap(component: icalendar.Component) -> icalendar.Calendar:
     return calendar
 
 
-def vevent__build(dto: EventCreateDto, *, uid: str, tz: zoneinfo.ZoneInfo) -> icalendar.Calendar:
+def vevent__build(dto: EventCreateDto, *, uid: str, tz: zoneinfo.ZoneInfo, organizer: str) -> icalendar.Calendar:
     start_local = date_like__localize(dto.start, tz)
     end_local = date_like__localize(dto.end, tz) if dto.end is not None else None
     start = date_like__for_ical(start_local, tz)
@@ -300,8 +330,8 @@ def vevent__build(dto: EventCreateDto, *, uid: str, tz: zoneinfo.ZoneInfo) -> ic
         event.add('DESCRIPTION', dto.description)
     if dto.location:
         event.add('LOCATION', dto.location)
-    for email in dto.attendees:
-        event.add('ATTENDEE', attendee__build(email))
+    if dto.attendees:
+        vevent__add_attendees(event, dto.attendees, organizer=organizer)
     if dto.rrule:
         event.add('RRULE', icalendar.vRecur.from_ical(dto.rrule))
     return vcalendar__wrap(event)
@@ -514,21 +544,31 @@ def sequence__increment(component: icalendar.Component) -> None:
     component.add('SEQUENCE', sequence + 1)
 
 
-def vcalendar__apply_update(calendar: icalendar.Calendar, dto: EventUpdateDto, tz: zoneinfo.ZoneInfo) -> None:
+def vcalendar__apply_update(
+    calendar: icalendar.Calendar, dto: EventUpdateDto, tz: zoneinfo.ZoneInfo, *, organizer: str
+) -> None:
     """Правка объекта: без recurrence_id мастер (вся серия), с ним один экземпляр через переопределение.
 
     SEQUENCE мастера поднимает caldav при сохранении, SEQUENCE переопределения поднимаем сами,
     иначе участники по RFC 5546 могут не принять обновление экземпляра.
+    Участники серии меняются и в переопределениях: у каждого экземпляра свой список участников.
     """
     if dto.recurrence_id is not None:
         override = vcalendar__occurrence_for_edit(calendar, dto.recurrence_id, tz)
         vevent__apply_update(override, dto, tz)
         sequence__increment(override)
+        edited = [override]
     else:
         master = vcalendar__master(calendar)
         old_start = dtstart__get(master)
         vevent__apply_update(master, dto, tz)
         series__shift(calendar, old_start, dtstart__get(master))
+        edited = list(calendar.walk('VEVENT'))
+    for component in edited:
+        if dto.remove_attendees:
+            vevent__remove_attendees(component, dto.remove_attendees, organizer=organizer)
+        if dto.add_attendees:
+            vevent__add_attendees(component, dto.add_attendees, organizer=organizer)
     calendar.add_missing_timezones()
 
 

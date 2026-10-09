@@ -35,6 +35,7 @@ from yandex_calendar_mcp.ical import (
 from yandex_calendar_mcp.server import domain_errors__as_tool_error
 
 MSK = zoneinfo.ZoneInfo('Europe/Moscow')
+ME = 'me@yandex.ru'
 CALENDAR_URL = 'https://caldav.yandex.ru/calendars/me%40yandex.ru/events-1/'
 
 # Так Яндекс хранит серию: мастер и переопределения в одном объекте, всё в TZID=Europe/Moscow
@@ -287,7 +288,9 @@ def test_series_shift_moves_overrides_and_exdates_with_master() -> None:
     calendar = icalendar.Calendar.from_ical(ICS_SERIES)
     vcalendar__exclude_occurrence(calendar, datetime.datetime(2026, 10, 21, 14, 0), MSK)
 
-    vcalendar__apply_update(calendar, EventUpdateDto(uid='series-1', start=datetime.datetime(2026, 9, 23, 15, 0)), MSK)
+    vcalendar__apply_update(
+        calendar, EventUpdateDto(uid='series-1', start=datetime.datetime(2026, 9, 23, 15, 0)), MSK, organizer=ME
+    )
 
     occurrences = recurring_ical_events.of(calendar).between(datetime.date(2026, 10, 1), datetime.date(2026, 11, 1))
     assert [_dt(item, 'DTSTART') for item in occurrences] == [datetime.datetime(2026, 10, 7, 13, 30, tzinfo=MSK)]
@@ -300,7 +303,9 @@ def test_series_shift_refuses_type_change_with_overrides() -> None:
     calendar = icalendar.Calendar.from_ical(ICS_SERIES)
 
     with pytest.raises(InvalidEventError, match='весь день'):
-        vcalendar__apply_update(calendar, EventUpdateDto(uid='series-1', start=datetime.date(2026, 9, 23)), MSK)
+        vcalendar__apply_update(
+            calendar, EventUpdateDto(uid='series-1', start=datetime.date(2026, 9, 23)), MSK, organizer=ME
+        )
 
 
 def test_occurrence_update_bumps_override_sequence() -> None:
@@ -308,12 +313,44 @@ def test_occurrence_update_bumps_override_sequence() -> None:
     calendar = icalendar.Calendar.from_ical(ICS_SERIES)
     dto = EventUpdateDto(uid='series-1', recurrence_id=datetime.datetime(2026, 10, 21, 14, 0), summary='x')
 
-    vcalendar__apply_update(calendar, dto, MSK)
+    vcalendar__apply_update(calendar, dto, MSK, organizer=ME)
 
     override = vcalendar__override_find(calendar, datetime.datetime(2026, 10, 21, 14, 0, tzinfo=MSK), MSK)
     assert override is not None
     assert override['SEQUENCE'] == 7
     assert vcalendar__master(calendar)['SEQUENCE'] == 6
+
+
+def test_series_attendee_change_reaches_overrides() -> None:
+    """Участник серии добавляется и в переопределения: у перенесённого экземпляра свой список участников."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+
+    vcalendar__apply_update(
+        calendar, EventUpdateDto(uid='series-1', add_attendees=['a@example.com']), MSK, organizer=ME
+    )
+
+    assert [[str(c['ATTENDEE'])] for c in _vevents(calendar)] == [['mailto:a@example.com']] * 2
+    assert {str(c['ORGANIZER']) for c in _vevents(calendar)} == {f'mailto:{ME}'}
+
+    vcalendar__apply_update(
+        calendar, EventUpdateDto(uid='series-1', remove_attendees=['a@example.com']), MSK, organizer=ME
+    )
+
+    assert ['ATTENDEE' in c for c in _vevents(calendar)] == [False, False]
+
+
+def test_occurrence_attendee_change_touches_only_this_instance() -> None:
+    """С recurrence_id участник добавляется только в переопределение этого экземпляра, мастер не меняется."""
+    calendar = icalendar.Calendar.from_ical(ICS_SERIES)
+    occurrence = datetime.datetime(2026, 10, 21, 14, 0)
+    dto = EventUpdateDto(uid='series-1', recurrence_id=occurrence, add_attendees=['a@example.com'])
+
+    vcalendar__apply_update(calendar, dto, MSK, organizer=ME)
+
+    override = vcalendar__override_find(calendar, occurrence.replace(tzinfo=MSK), MSK)
+    assert override is not None
+    assert str(override['ATTENDEE']) == 'mailto:a@example.com'
+    assert 'ATTENDEE' not in vcalendar__master(calendar)
 
 
 ICS_INVITE = """BEGIN:VCALENDAR

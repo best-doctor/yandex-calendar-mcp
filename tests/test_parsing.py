@@ -19,16 +19,20 @@ from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.dto import EventCreateDto, EventInfo, EventUpdateDto, TodoCreateDto
 from yandex_calendar_mcp.errors import EventNotFoundError, InvalidEventError
 from yandex_calendar_mcp.ical import (
+    attendees__from_vevent,
     calendar_id__from_url,
     events__by_days,
     events__from_icalendar,
+    vevent__add_attendees,
     vevent__apply_update,
     vevent__build,
+    vevent__remove_attendees,
     vtodo__build,
 )
 from yandex_calendar_mcp.server import DateParam, server__build
 
 MSK = zoneinfo.ZoneInfo('Europe/Moscow')
+ME = 'me@example.com'
 
 ICS_TIMED = """BEGIN:VCALENDAR
 VERSION:2.0
@@ -279,7 +283,7 @@ def test_vevent_build_uses_tzid_duration_attendees_and_rrule() -> None:
         location='Zoom',
     )
 
-    calendar = vevent__build(dto, uid='u-1', tz=MSK)
+    calendar = vevent__build(dto, uid='u-1', tz=MSK, organizer=ME)
     component = next(c for c in calendar.walk('VEVENT'))
 
     assert component['UID'] == 'u-1'
@@ -292,12 +296,33 @@ def test_vevent_build_uses_tzid_duration_attendees_and_rrule() -> None:
     assert 'VTIMEZONE' in {c.name for c in calendar.subcomponents}
 
 
+def test_vevent_build_with_attendees_sets_own_organizer() -> None:
+    """Встреча с участниками получает ORGANIZER: без него Яндекс молча выбрасывает ATTENDEE. Дубли схлопываются."""
+    dto = EventCreateDto(
+        summary='Созвон', start=datetime.datetime(2026, 10, 9, 20, 0), attendees=['a@example.com', 'A@example.com']
+    )
+
+    component = next(c for c in vevent__build(dto, uid='u', tz=MSK, organizer=ME).walk('VEVENT'))
+
+    assert str(component['ORGANIZER']) == f'mailto:{ME}'
+    assert [a.email for a in attendees__from_vevent(component)] == ['a@example.com']
+
+
+def test_vevent_build_without_attendees_has_no_organizer() -> None:
+    """Личное событие без участников остаётся без ORGANIZER, как его создаёт веб-интерфейс."""
+    dto = EventCreateDto(summary='Фокус', start=datetime.datetime(2026, 10, 9, 20, 0))
+
+    component = next(c for c in vevent__build(dto, uid='u', tz=MSK, organizer=ME).walk('VEVENT'))
+
+    assert 'ORGANIZER' not in component
+
+
 def test_vevent_build_series_keeps_local_time_across_dst() -> None:
     """Серия в зоне с переходом времени остаётся в 10:00 после перехода: время пишется с TZID, а не в UTC."""
     berlin = zoneinfo.ZoneInfo('Europe/Berlin')
     dto = EventCreateDto(summary='x', start=datetime.datetime(2026, 10, 19, 10, 0), rrule='FREQ=WEEKLY;COUNT=3')
 
-    calendar = icalendar.Calendar.from_ical(vevent__build(dto, uid='u', tz=berlin).to_ical())
+    calendar = icalendar.Calendar.from_ical(vevent__build(dto, uid='u', tz=berlin, organizer=ME).to_ical())
     occurrences = recurring_ical_events.of(calendar).between(datetime.date(2026, 10, 1), datetime.date(2026, 12, 1))
     starts = [_dt(c, 'DTSTART') for c in occurrences]
 
@@ -325,12 +350,14 @@ def test_all_day_end_equal_to_start_explains_exclusive_end() -> None:
     dto = EventCreateDto(summary='x', start=datetime.date(2026, 10, 10), end=datetime.date(2026, 10, 10))
 
     with pytest.raises(InvalidEventError, match='end=2026-10-11'):
-        vevent__build(dto, uid='u', tz=MSK)
+        vevent__build(dto, uid='u', tz=MSK, organizer=ME)
 
 
 def test_vevent_build_all_day_defaults_to_one_day() -> None:
     """Дата без времени даёт событие на весь день с DTEND на следующий день."""
-    calendar = vevent__build(EventCreateDto(summary='Отпуск', start=datetime.date(2026, 10, 10)), uid='u', tz=MSK)
+    calendar = vevent__build(
+        EventCreateDto(summary='Отпуск', start=datetime.date(2026, 10, 10)), uid='u', tz=MSK, organizer=ME
+    )
     component = next(c for c in calendar.walk('VEVENT'))
 
     assert _dt(component, 'DTSTART') == datetime.date(2026, 10, 10)
@@ -342,7 +369,7 @@ def test_vevent_build_rejects_end_before_start() -> None:
     dto = EventCreateDto(summary='x', start=datetime.datetime(2026, 1, 1, 12), end=datetime.datetime(2026, 1, 1, 11))
 
     with pytest.raises(InvalidEventError):
-        vevent__build(dto, uid='u', tz=MSK)
+        vevent__build(dto, uid='u', tz=MSK, organizer=ME)
 
 
 def test_vevent_apply_update_changes_only_given_fields() -> None:
@@ -420,3 +447,47 @@ def test_get_event_occurrence_returns_instance_for_date(client: YandexCalendarCl
 
         with pytest.raises(EventNotFoundError):
             client.event__get('abc-123', occurrence=datetime.date(2026, 10, 16))
+
+
+def _own_meeting() -> icalendar.Component:
+    """ICS_TIMED, где организатор я сам."""
+    return next(c for c in icalendar.Calendar.from_ical(ICS_TIMED.replace('boss@example.com', ME)).walk('VEVENT'))
+
+
+def test_vevent_add_attendees_skips_already_invited() -> None:
+    """Новый участник получает приглашение с RSVP, уже приглашённый (в любом регистре) не дублируется."""
+    component = _own_meeting()
+
+    vevent__add_attendees(component, ['new@example.com', 'OTHER@example.com'], organizer=ME)
+
+    attendees = {a.email: a.status for a in attendees__from_vevent(component)}
+    assert attendees == {ME: 'ACCEPTED', 'other@example.com': 'NEEDS-ACTION', 'new@example.com': 'NEEDS-ACTION'}
+
+
+def test_vevent_add_attendees_sets_organizer_on_personal_event() -> None:
+    """Личное событие без ORGANIZER становится встречей: проставляется свой адрес, иначе Яндекс выбросит участника."""
+    component = next(c for c in icalendar.Calendar.from_ical(ICS_DURATION).walk('VEVENT'))
+
+    vevent__add_attendees(component, ['new@example.com'], organizer=ME)
+
+    assert str(component['ORGANIZER']) == f'mailto:{ME}'
+    assert [a.email for a in attendees__from_vevent(component)] == ['new@example.com']
+
+
+def test_vevent_remove_attendees_keeps_others() -> None:
+    """Убирается только названный участник, регистр адреса не важен, отсутствующий адрес не ошибка."""
+    component = _own_meeting()
+
+    vevent__remove_attendees(component, ['Other@example.com', 'ghost@example.com'], organizer=ME)
+
+    assert [a.email for a in attendees__from_vevent(component)] == [ME]
+
+
+@pytest.mark.parametrize('change', [vevent__add_attendees, vevent__remove_attendees])
+def test_attendees_of_foreign_meeting_are_not_changed(change: typing.Callable[..., None]) -> None:
+    """В чужой встрече участников не менять: рассылает приглашения организатор, а не участник."""
+    component = next(c for c in icalendar.Calendar.from_ical(ICS_TIMED).walk('VEVENT'))
+
+    with pytest.raises(InvalidEventError, match=r'boss@example\.com'):
+        change(component, ['new@example.com'], organizer=ME)
+    assert len(attendees__from_vevent(component)) == 2

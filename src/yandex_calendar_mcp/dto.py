@@ -187,6 +187,13 @@ class EventUpdateDto(BaseDto):
     start: DateLikeInput | None = None
     end: DateLikeInput | None = Field(default=None, description='Для события на весь день end не включается')
     status: EventStatus | None = None
+    add_attendees: list[str] = Field(
+        default_factory=list,
+        description='E-mail новых участников, им уйдут приглашения. Уже приглашённые пропускаются',
+    )
+    remove_attendees: list[str] = Field(
+        default_factory=list, description='E-mail участников, которых убрать из встречи, им уйдёт отмена'
+    )
 
 
 class TodoCreateDto(BaseDto):
