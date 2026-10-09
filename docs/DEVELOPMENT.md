@@ -37,10 +37,14 @@ CI (`.github/workflows/ci.yml`) на каждый push и PR: ruff, mypy, pytest
 или вручную через Run workflow после настройки одного из способов.
 
 ```bash
-# 1. поднять __version__ в src/yandex_calendar_mcp/__init__.py, закоммитить
-# 2. тег и пуш
+# 1. поднять __version__ в src/yandex_calendar_mcp/__init__.py
+# 2. перенести записи из [Unreleased] в раздел новой версии в CHANGELOG.md, закоммитить
+# 3. тег и пуш
 git tag v0.1.0 && git push origin v0.1.0
 ```
+
+После загрузки в PyPI workflow создаёт GitHub Release с тем же тегом: заметки берутся из раздела этой версии
+в `CHANGELOG.md`, к релизу прикладываются wheel и sdist.
 
 После публикации `uvx yandex-calendar-mcp@latest` ставит свежую версию с PyPI.
 

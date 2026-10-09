@@ -17,7 +17,7 @@ jobs:
     environment: pypi
     # id-token нужен для trusted publishing (OIDC): action использует его, когда секрет PYPI_API_TOKEN пуст
     permissions:
-      contents: read
+      contents: write  # создание GitHub Release
       id-token: write
     steps:
       - name: Checkout
@@ -64,3 +64,26 @@ jobs:
           packages-dir: dist/
           password: ${{ secrets.PYPI_API_TOKEN }}
           skip-existing: true
+
+      - name: Release notes from CHANGELOG
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os, re, pathlib
+          version = os.environ['GITHUB_REF_NAME'].removeprefix('v')
+          text = pathlib.Path('CHANGELOG.md').read_text(encoding='utf-8')
+          match = re.search(rf'^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## \[|^\[Unreleased\]:|\Z)', text, re.M | re.S)
+          notes = match.group(1).strip() if match else f'Release {version}. Раздел в CHANGELOG.md не найден.'
+          pathlib.Path('release-notes.md').write_text(notes + '\n', encoding='utf-8')
+          print(notes)
+          PY
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag
