@@ -368,8 +368,14 @@ def tools__register_write(mcp: MCPServer) -> None:
         return client__from_context(ctx).todo__delete(uid, calendar_id=calendar_id)
 
 
-def main() -> None:
+def main(*, forced_readonly: bool = False) -> None:
+    """Точка входа stdio. forced_readonly игнорирует YANDEX_CALDAV_MODE и всегда поднимает режим чтения."""
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
     # caldav пишет diff каждого исправленного объекта на уровне WARNING, это шум
     logging.getLogger('caldav').setLevel(logging.ERROR)
-    server__build(Settings()).run('stdio')  # type: ignore[call-arg]
+    settings = Settings(mode='readonly') if forced_readonly else Settings()  # type: ignore[call-arg]
+    server__build(settings).run('stdio')
+
+
+def main_readonly() -> None:
+    main(forced_readonly=True)
