@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-09
+
 ### Добавлено
 
 - `update_event`: поля `add_attendees` и `remove_attendees`, чтобы добавлять и убирать участников своей встречи.
@@ -40,5 +42,6 @@
 - Ретраи на сетевые сбои и 5xx, ожидаемые ошибки возвращаются модели текстом.
 - CI на Python 3.12 и 3.13, публикация в PyPI по тегу, GitHub Release с заметками из changelog.
 
-[Unreleased]: https://github.com/best-doctor/yandex-calendar-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/best-doctor/yandex-calendar-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/best-doctor/yandex-calendar-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/best-doctor/yandex-calendar-mcp/releases/tag/v0.1.0
