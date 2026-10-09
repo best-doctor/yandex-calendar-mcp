@@ -1,0 +1,44 @@
+tests/test_parsing.py
+  s_2c71a8ec26c33c::t_797242ad4e6cae 236
+  s_2c71a8ec26c33c::t_2633d01682f5e5 20,402-422
+README.md
+  s_2c71a8ec26c33c::t_2633d01682f5e5 96
+  s_2c71a8ec26c33c::t_f3356dd2f404c6 103,127-131,153,189-191
+src/yandex_calendar_mcp/client.py
+  s_2c71a8ec26c33c::t_baa7c1e1a17380 14
+  s_2c71a8ec26c33c::t_2633d01682f5e5 291-297,299-300,311-317
+  s_2c71a8ec26c33c::t_797242ad4e6cae 452-453
+  s_2c71a8ec26c33c::t_bbe497fafa8b94 21,42,449-451,454-490
+  s_2c71a8ec26c33c::t_e95f2a53df633f 318,491-492
+tests/test_freebusy.py
+  s_2c71a8ec26c33c::t_bbe497fafa8b94 1-95
+src/yandex_calendar_mcp/freebusy.py
+  s_2c71a8ec26c33c::t_baa7c1e1a17380 61-62
+  s_2c71a8ec26c33c::t_bbe497fafa8b94 1-33,35-60,63-85
+  s_2c71a8ec26c33c::t_797242ad4e6cae 34
+src/yandex_calendar_mcp/dto.py
+  s_2c71a8ec26c33c::t_bbe497fafa8b94 97-116
+src/yandex_calendar_mcp/ical.py
+  s_2c71a8ec26c33c::t_bbe497fafa8b94 188-191,193-203
+src/yandex_calendar_mcp/server.py
+  s_2c71a8ec26c33c::t_bbe497fafa8b94 24,47,275-304
+  s_2c71a8ec26c33c::t_2633d01682f5e5 167-171,174-182
+  s_2c71a8ec26c33c::t_18e6a084dcf5fe 116-119,312-313,324-326
+  s_2c71a8ec26c33c::t_427fec7e11456e 305
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9938a313949e6dc2226adcec2a6db98328b7b335",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
