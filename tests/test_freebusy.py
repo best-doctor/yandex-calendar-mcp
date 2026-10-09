@@ -12,7 +12,7 @@ MSK = zoneinfo.ZoneInfo('Europe/Moscow')
 SCHEDULE_RESPONSE = """<?xml version="1.0" encoding="utf-8"?>
 <C:schedule-response xmlns:C="urn:ietf:params:xml:ns:caldav">
   <C:response>
-    <C:recipient><D:href xmlns:D="DAV:">mailto:a@luchi.ru</D:href></C:recipient>
+    <C:recipient><D:href xmlns:D="DAV:">mailto:a@example.com</D:href></C:recipient>
     <C:request-status>2.0;Success</C:request-status>
     <C:calendar-data><![CDATA[BEGIN:VCALENDAR
 VERSION:2.0
@@ -28,7 +28,7 @@ END:VCALENDAR
 ]]></C:calendar-data>
   </C:response>
   <C:response>
-    <C:recipient><D:href xmlns:D="DAV:">mailto:me@luchi.ru</D:href></C:recipient>
+    <C:recipient><D:href xmlns:D="DAV:">mailto:me@example.com</D:href></C:recipient>
     <C:request-status>2.0;Success</C:request-status>
     <C:calendar-data><![CDATA[BEGIN:VCALENDAR
 VERSION:2.0
@@ -50,7 +50,7 @@ def test_schedule_response_parse_gives_busy_intervals_in_local_tz() -> None:
     """Каждый участник получает свои интервалы в таймзоне пользователя с типом занятости."""
     parsed = schedule_response__parse(SCHEDULE_RESPONSE, tz=MSK)
 
-    assert [a.email for a in parsed] == ['a@luchi.ru', 'me@luchi.ru']
+    assert [a.email for a in parsed] == ['a@example.com', 'me@example.com']
     assert parsed[0].request_status.startswith('2.0')
     assert [(i.start.hour, i.end.hour, i.kind) for i in parsed[0].busy] == [
         (18, 18, 'BUSY-TENTATIVE'),
@@ -82,14 +82,14 @@ def test_common_free_excludes_everyones_busy() -> None:
 def test_freebusy_request_build_is_itip_request_in_utc() -> None:
     """Запрос в outbox: METHOD:REQUEST, организатор, участники, границы в UTC."""
     body = freebusy_request__build(
-        organizer='me@luchi.ru',
-        attendees=['me@luchi.ru', 'a@luchi.ru'],
+        organizer='me@example.com',
+        attendees=['me@example.com', 'a@example.com'],
         start=datetime.datetime(2026, 10, 9, 9, 0, tzinfo=MSK),
         end=datetime.datetime(2026, 10, 9, 20, 0, tzinfo=MSK),
     )
 
     assert 'METHOD:REQUEST' in body
-    assert 'ORGANIZER:mailto:me@luchi.ru' in body
-    assert 'ATTENDEE:mailto:a@luchi.ru' in body
+    assert 'ORGANIZER:mailto:me@example.com' in body
+    assert 'ATTENDEE:mailto:a@example.com' in body
     assert 'DTSTART:20261009T060000Z' in body
     assert 'DTEND:20261009T170000Z' in body
