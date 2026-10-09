@@ -71,6 +71,50 @@ Claude Desktop и другие клиенты с JSON-конфигом:
 }
 ```
 
+Codex CLI (конфиг `~/.codex/config.toml`):
+
+```bash
+codex mcp add yandex-calendar \
+  --env YANDEX_CALDAV_EMAIL=login@yandex.ru \
+  --env YANDEX_CALDAV_KEY=пароль_приложения \
+  --env YANDEX_CALDAV_MODE=readonly \
+  -- uvx yandex-calendar-mcp@latest
+```
+
+То же самое руками в `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.yandex-calendar]
+command = "uvx"
+args = ["yandex-calendar-mcp@latest"]
+
+[mcp_servers.yandex-calendar.env]
+YANDEX_CALDAV_EMAIL = "login@yandex.ru"
+YANDEX_CALDAV_KEY = "пароль_приложения"
+YANDEX_CALDAV_MODE = "readonly"
+```
+
+Cursor: Settings → MCP → Add new global MCP server, либо файл `~/.cursor/mcp.json` для всех проектов
+или `.cursor/mcp.json` в корне проекта. Пароль можно не писать в файл, а взять из переменной окружения
+через `${env:...}`:
+
+```json
+{
+  "mcpServers": {
+    "yandex-calendar": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": ["yandex-calendar-mcp@latest"],
+      "env": {
+        "YANDEX_CALDAV_EMAIL": "login@yandex.ru",
+        "YANDEX_CALDAV_KEY": "${env:YANDEX_CALDAV_KEY}",
+        "YANDEX_CALDAV_MODE": "readonly"
+      }
+    }
+  }
+}
+```
+
 Точка входа `yandex-calendar-mcp-ro` всегда поднимает режим чтения, что бы ни стояло в `YANDEX_CALDAV_MODE`:
 
 ```bash
