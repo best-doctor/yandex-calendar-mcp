@@ -1,0 +1,26 @@
+docs/DEVELOPMENT.md
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 3-9,11-15,17-33,35
+  s_2c71a8ec26c33c::t_6c2747466159e0 1-2,36-133
+  s_2c71a8ec26c33c::t_9da61815cafe88 10,16,34
+README.md
+  s_2c71a8ec26c33c::t_9da61815cafe88 3,43,53,63,74,77
+  s_2c71a8ec26c33c::t_c8f5ed37fc76c7 4-5,27-28,30-35,37,40-42,46,49-52,56,62,64-68,75-76,80
+  s_2c71a8ec26c33c::t_6c2747466159e0 7-8,10,12,14,16,18,20-21,23,25,84-87,120
+  s_2c71a8ec26c33c::t_927be6be2a427f 78-79
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "39632be7c8cff94c3de11872c54dae2b2e4c8b3b",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
