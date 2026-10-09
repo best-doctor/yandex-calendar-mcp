@@ -7,10 +7,11 @@ import functools
 import logging
 import re
 import typing
+import urllib.parse
 import uuid
 
 import backoff
-from caldav.calendarobjectresource import CalendarObjectResource, Todo
+from caldav.calendarobjectresource import CalendarObjectResource, Event, Todo
 from caldav.collection import (
     Calendar,
     Principal,
@@ -19,7 +20,7 @@ from caldav.collection import (
     SynchronizableCalendarObjectCollection,
 )
 from caldav.davclient import DAVClient
-from caldav.elements import dav
+from caldav.elements import cdav, dav
 from caldav.lib import error as caldav_error
 
 from yandex_calendar_mcp.config import Settings
@@ -108,6 +109,8 @@ COMPONENTS_BY_ID_PREFIX = {'events-': ['VEVENT'], 'todos-': ['VTODO']}
 HTTP_STATUS_PATTERN = re.compile(r'\b([1-5]\d\d) [A-Z][A-Za-z]')
 # calendar-multiget за один запрос; 148 объектов Яндекс отдаёт примерно за 6 секунд
 MULTIGET_CHUNK_SIZE = 100
+
+ObjectT = typing.TypeVar('ObjectT', bound=CalendarObjectResource)
 
 
 def http_status__from_error(exc: Exception) -> int | None:
@@ -245,8 +248,63 @@ class YandexCalendarClient:
         return typing.cast(list[CalendarObjectResource], cal.search(**search_args))
 
     @retry_on_transient_error
-    def object__by_uid(self, cal: Calendar, uid: str) -> CalendarObjectResource:
-        return typing.cast(CalendarObjectResource, cal.get_event_by_uid(uid))
+    def object__by_uid(self, cal: Calendar, uid: str) -> Event:
+        return typing.cast(Event, cal.get_event_by_uid(uid))
+
+    @retry_on_transient_error
+    def object__by_href(self, cal: Calendar, uid: str, comp_class: type[ObjectT]) -> ObjectT | None:
+        """GET <календарь>/<uid>.ics. None, если по этому адресу ничего нет или лежит объект с другим UID.
+
+        Яндекс кладёт объект по адресу <uid>.ics, а фильтр по UID в calendar-query игнорирует и отдаёт
+        всю коллекцию: на живом календаре это 10 МБ и 15–30 с против 0,1–0,8 с у GET.
+        Запрос идёт мимо obj.load(): тот на 5xx молча кладёт в data тело страницы ошибки, и ретрай не срабатывает.
+        """
+        url = f'{str(cal.url).rstrip("/")}/{urllib.parse.quote(uid, safe="")}.ics'
+        try:
+            response = self.dav.request(url)
+        except caldav_error.AuthorizationError:
+            # 403 на одном календаре (чужой слой) не должен обрывать поиск в остальных;
+            # неверный пароль всё равно всплывёт из поиска по UID
+            return None
+        if response.status == 404:
+            return None
+        if response.status >= 400:
+            # Текст в формате "502 Bad Gateway": по нему retry_on_transient_error отличает 5xx от 4xx
+            raise caldav_error.ResponseError(f'GET {url}: {response.status} {response.reason}')
+        obj = comp_class(client=self.dav, url=url, data=response.raw, parent=cal)
+        if obj.id != uid:
+            return None
+        # ETag уходит в If-Match при сохранении: правку поверх чужой сервер отклонит с 412
+        if etag := response.headers.get('ETag'):
+            obj.props[dav.GetEtag.tag] = etag
+        return obj
+
+    def object__locate(
+        self,
+        uid: str,
+        calendar_id: str | None,
+        *,
+        component: str,
+        comp_class: type[ObjectT],
+        by_search: typing.Callable[[Calendar, str], ObjectT],
+        not_found: str,
+    ) -> tuple[Calendar, ObjectT]:
+        """GET по <uid>.ics во всех подходящих календарях; поиск по UID только в явно указанном календаре.
+
+        Поиск нужен для объектов, которые сторонний клиент загрузил под другим именем файла. По всем календарям
+        он не идёт: в каждом, где объекта нет, Яндекс отдаёт всю коллекцию, и промах стоит минуты.
+        """
+        calendars = self.calendars__for_query(calendar_id, component=component)
+        for cal in calendars:
+            obj = self.object__by_href(cal, uid, comp_class)
+            if obj is not None:
+                return cal, obj
+        if calendar_id is None:
+            raise EventNotFoundError(f'{not_found}. Если объект создан сторонним клиентом, укажите calendar_id')
+        try:
+            return calendars[0], by_search(calendars[0], uid)
+        except caldav_error.NotFoundError:
+            raise EventNotFoundError(not_found) from None
 
     def events__list(
         self,
@@ -294,12 +352,14 @@ class YandexCalendarClient:
         return events, start, end
 
     def object__find(self, uid: str, *, calendar_id: str | None) -> tuple[Calendar, CalendarObjectResource]:
-        for cal in self.calendars__for_query(calendar_id, component='VEVENT'):
-            try:
-                return cal, self.object__by_uid(cal, uid)
-            except caldav_error.NotFoundError:
-                continue
-        raise EventNotFoundError(f'Событие с uid {uid!r} не найдено')
+        return self.object__locate(
+            uid,
+            calendar_id,
+            component='VEVENT',
+            comp_class=Event,
+            by_search=self.object__by_uid,
+            not_found=f'Событие с uid {uid!r} не найдено',
+        )
 
     def event__get(
         self, uid: str, *, calendar_id: str | None = None, occurrence: datetime.date | None = None
@@ -548,13 +608,33 @@ class YandexCalendarClient:
             return typing.cast(CalendarObjectResource, cal.add_todo(ical=ical))
         return typing.cast(CalendarObjectResource, cal.add_event(ical=ical))
 
-    @retry_on_transient_error
     def object__save(self, obj: CalendarObjectResource, *, increase_seqno: bool = True) -> None:
+        """PUT с If-Match, если у объекта есть ETag. Повтор после временного сбоя идёт уже без условия.
+
+        Первый PUT мог дойти до сервера, а ответ потеряться: повтор с прежним ETag получил бы 412 на собственную
+        правку. Без условия повтор записывает то же содержимое и остаётся идемпотентным.
+        """
+        try:
+            self.object__put(obj, increase_seqno=increase_seqno)
+        except RETRYABLE_ERRORS as exc:
+            if caldav_error__is_permanent(exc):
+                raise
+            log.info('PUT %s failed (%s), retrying without If-Match', obj.url, type(exc).__name__)
+            obj.props.pop(dav.GetEtag.tag, None)
+            obj.props.pop(cdav.ScheduleTag.tag, None)
+            # SEQUENCE уже поднят первой попыткой
+            self.object__put_retrying(obj)
+
+    def object__put(self, obj: CalendarObjectResource, *, increase_seqno: bool) -> None:
         # only_this_recurrence=False: объект уже содержит мастер и все переопределения, caldav не должен их сливать
         try:
             obj.save(increase_seqno=increase_seqno, only_this_recurrence=False)
         except (caldav_error.ETagMismatchError, caldav_error.ScheduleTagMismatchError) as exc:
             raise EventConflictError('Объект изменился на сервере, перечитайте его и повторите') from exc
+
+    @retry_on_transient_error
+    def object__put_retrying(self, obj: CalendarObjectResource) -> None:
+        self.object__put(obj, increase_seqno=False)
 
     @retry_on_transient_error
     def object__delete(self, obj: CalendarObjectResource) -> None:
@@ -634,12 +714,14 @@ class YandexCalendarClient:
         return typing.cast(Todo, cal.get_todo_by_uid(uid))
 
     def todo__find(self, uid: str, *, calendar_id: str | None) -> tuple[Calendar, Todo]:
-        for cal in self.calendars__for_query(calendar_id, component='VTODO'):
-            try:
-                return cal, self.todo__by_uid(cal, uid)
-            except caldav_error.NotFoundError:
-                continue
-        raise EventNotFoundError(f'Задача с uid {uid!r} не найдена')
+        return self.object__locate(
+            uid,
+            calendar_id,
+            component='VTODO',
+            comp_class=Todo,
+            by_search=self.todo__by_uid,
+            not_found=f'Задача с uid {uid!r} не найдена',
+        )
 
     def todo__create(self, dto: TodoCreateDto) -> WriteResult:
         cal = self.calendar__for_write(dto.calendar_id, component='VTODO')

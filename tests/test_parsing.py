@@ -12,12 +12,16 @@ import icalendar
 import pydantic
 import pytest
 import recurring_ical_events
+from caldav.calendarobjectresource import Event, Todo
+from caldav.elements import dav
+from caldav.lib import error as caldav_error
+from caldav.lib.url import URL
 from pydantic import SecretStr
 
-from yandex_calendar_mcp.client import YandexCalendarClient
+from yandex_calendar_mcp.client import YandexCalendarClient, caldav_error__is_permanent
 from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.dto import EventCreateDto, EventInfo, EventUpdateDto, TodoCreateDto
-from yandex_calendar_mcp.errors import EventNotFoundError, InvalidEventError
+from yandex_calendar_mcp.errors import EventConflictError, EventNotFoundError, InvalidEventError
 from yandex_calendar_mcp.ical import (
     attendees__from_vevent,
     calendar_id__from_url,
@@ -438,7 +442,7 @@ def test_get_event_occurrence_returns_instance_for_date(client: YandexCalendarCl
     master = FakeObject(ICS_TIMED)
     with (
         mock.patch.object(client, 'calendars__for_query', return_value=[_fake_calendar()]),
-        mock.patch.object(client, 'object__by_uid', return_value=master),
+        mock.patch.object(client, 'object__by_href', return_value=master),
         mock.patch.object(client, 'objects__search', return_value=[FakeObject(ICS_INSTANCE_OCT_15)]),
     ):
         event = client.event__get('abc-123', occurrence=datetime.date(2026, 10, 15))
@@ -447,6 +451,159 @@ def test_get_event_occurrence_returns_instance_for_date(client: YandexCalendarCl
 
         with pytest.raises(EventNotFoundError):
             client.event__get('abc-123', occurrence=datetime.date(2026, 10, 16))
+
+
+def _response(status: int = 200, raw: str = ICS_TIMED, etag: str | None = '"e1"') -> types.SimpleNamespace:
+    """Замена caldav.DAVResponse для object__by_href."""
+    headers = {'ETag': etag} if etag else {}
+    return types.SimpleNamespace(
+        status=status, reason='Bad Gateway' if status >= 500 else 'OK', raw=raw, headers=headers
+    )
+
+
+def _dav(request_result: object) -> mock.Mock:
+    """DAVClient с настоящим URL: caldav склеивает с ним адрес объекта."""
+    dav = mock.Mock(url=URL.objectify('https://caldav.yandex.ru/'))
+    if isinstance(request_result, Exception):
+        dav.request.side_effect = request_result
+    else:
+        dav.request.return_value = request_result
+    return dav
+
+
+def test_object_by_href_requests_uid_ics_and_keeps_etag(client: YandexCalendarClient) -> None:
+    """Объект запрашивается по адресу <календарь>/<uid>.ics, спецсимволы uid экранируются, ETag идёт в If-Match."""
+    dav = _dav(_response(raw=ICS_TIMED.replace('UID:abc-123', 'UID:abc@yandex.ru')))
+
+    with mock.patch.object(client, 'dav', dav):
+        obj = client.object__by_href(_fake_calendar(), 'abc@yandex.ru', Event)  # type: ignore[arg-type]
+
+    dav.request.assert_called_once_with('https://caldav.yandex.ru/calendars/me/events-1/abc%40yandex.ru.ics')
+    assert obj is not None
+    assert obj.id == 'abc@yandex.ru'
+    assert obj.etag == '"e1"'
+
+
+@pytest.mark.parametrize(
+    'request_result',
+    [
+        pytest.param(_response(status=404, raw=''), id='404'),
+        pytest.param(caldav_error.AuthorizationError('403 Forbidden'), id='403 on foreign layer'),
+        pytest.param(_response(raw=ICS_TIMED.replace('UID:abc-123', 'UID:other')), id='foreign uid'),
+    ],
+)
+def test_object_by_href_returns_none_when_object_is_not_there(
+    client: YandexCalendarClient, request_result: object
+) -> None:
+    """404, 403 или объект с другим UID по этому адресу: искать дальше, а не падать."""
+    with mock.patch.object(client, 'dav', _dav(request_result)):
+        assert client.object__by_href(_fake_calendar(), 'abc-123', Event) is None  # type: ignore[arg-type]
+
+
+def test_object_by_href_raises_retryable_error_on_5xx(client: YandexCalendarClient) -> None:
+    """5xx поднимается ошибкой, которую ретрай считает временной, а не превращается в объект со страницей ошибки."""
+    unwrapped = YandexCalendarClient.object__by_href.__wrapped__  # type: ignore[attr-defined]
+
+    with (
+        mock.patch.object(client, 'dav', _dav(_response(status=502, raw='<html>Bad Gateway</html>'))),
+        pytest.raises(caldav_error.ResponseError) as exc_info,
+    ):
+        unwrapped(client, _fake_calendar(), 'abc-123', Event)
+
+    assert not caldav_error__is_permanent(exc_info.value)
+
+
+def test_object_find_uses_direct_get_without_search(client: YandexCalendarClient) -> None:
+    """Если объект лежит по <uid>.ics, поиск по коллекции не запускается: на Яндексе он выкачивает её целиком."""
+    work, home = _fake_calendar(), types.SimpleNamespace(url='https://caldav.yandex.ru/calendars/me/events-2/')
+    master = FakeObject(ICS_TIMED)
+    with (
+        mock.patch.object(client, 'calendars__for_query', return_value=[work, home]),
+        mock.patch.object(client, 'object__by_href', side_effect=[None, master]) as by_href,
+        mock.patch.object(client, 'object__by_uid') as by_uid,
+    ):
+        assert client.object__find('abc-123', calendar_id=None) == (home, master)  # type: ignore[comparison-overlap]
+
+    assert [c.args[0] for c in by_href.call_args_list] == [work, home]
+    by_uid.assert_not_called()
+
+
+def test_object_find_without_calendar_id_does_not_search_every_calendar(client: YandexCalendarClient) -> None:
+    """Промах без calendar_id не запускает поиск: он выкачал бы каждую коллекцию целиком."""
+    with (
+        mock.patch.object(client, 'calendars__for_query', return_value=[_fake_calendar(), _fake_calendar()]),
+        mock.patch.object(client, 'object__by_href', return_value=None),
+        mock.patch.object(client, 'object__by_uid') as by_uid,
+        pytest.raises(EventNotFoundError, match='calendar_id'),
+    ):
+        client.object__find('abc-123', calendar_id=None)
+
+    by_uid.assert_not_called()
+
+
+def test_object_find_with_calendar_id_falls_back_to_search(client: YandexCalendarClient) -> None:
+    """В явно указанном календаре объект под чужим именем файла находится поиском по UID."""
+    cal = _fake_calendar()
+    master = FakeObject(ICS_TIMED)
+    with (
+        mock.patch.object(client, 'calendars__for_query', return_value=[cal]),
+        mock.patch.object(client, 'object__by_href', return_value=None),
+        mock.patch.object(client, 'object__by_uid', return_value=master) as by_uid,
+    ):
+        assert client.object__find('abc-123', calendar_id='events-1') == (cal, master)  # type: ignore[comparison-overlap]
+
+    by_uid.assert_called_once_with(cal, 'abc-123')
+
+
+def test_object_find_raises_when_neither_get_nor_search_finds(client: YandexCalendarClient) -> None:
+    with (
+        mock.patch.object(client, 'calendars__for_query', return_value=[_fake_calendar()]),
+        mock.patch.object(client, 'object__by_href', return_value=None),
+        mock.patch.object(client, 'object__by_uid', side_effect=caldav_error.NotFoundError('not found')),
+        pytest.raises(EventNotFoundError),
+    ):
+        client.object__find('abc-123', calendar_id='events-1')
+
+
+def test_todo_find_looks_up_vtodo_calendars_as_todo(client: YandexCalendarClient) -> None:
+    """Задача ищется только в календарях с VTODO и создаётся как Todo."""
+    cal = types.SimpleNamespace(url='https://caldav.yandex.ru/calendars/me/todos-1/')
+    todo = mock.sentinel.todo
+    with (
+        mock.patch.object(client, 'calendars__for_query', return_value=[cal]) as for_query,
+        mock.patch.object(client, 'object__by_href', return_value=todo) as by_href,
+    ):
+        assert client.todo__find('t-1', calendar_id=None) == (cal, todo)  # type: ignore[comparison-overlap]
+
+    for_query.assert_called_once_with(None, component='VTODO')
+    by_href.assert_called_once_with(cal, 't-1', Todo)
+
+
+def test_object_save_retries_put_without_if_match_after_transient_error(client: YandexCalendarClient) -> None:
+    """Первый PUT мог дойти до сервера: повтор с прежним ETag получил бы 412 на собственную правку."""
+    obj = mock.Mock(props={dav.GetEtag.tag: '"e1"'})
+    sent_etags: list[str | None] = []
+
+    def save(*, increase_seqno: bool, only_this_recurrence: bool) -> None:
+        sent_etags.append(obj.props.get(dav.GetEtag.tag))
+        if len(sent_etags) == 1:
+            raise TimeoutError('read timed out')
+
+    obj.save.side_effect = save
+    client.object__save(obj)
+
+    assert sent_etags == ['"e1"', None]
+    assert [c.kwargs['increase_seqno'] for c in obj.save.call_args_list] == [True, False]
+
+
+def test_object_save_reports_conflict_without_retry(client: YandexCalendarClient) -> None:
+    obj = mock.Mock(props={dav.GetEtag.tag: '"e1"'})
+    obj.save.side_effect = caldav_error.ETagMismatchError('412 Precondition Failed')
+
+    with pytest.raises(EventConflictError):
+        client.object__save(obj)
+
+    obj.save.assert_called_once()
 
 
 def _own_meeting() -> icalendar.Component:
