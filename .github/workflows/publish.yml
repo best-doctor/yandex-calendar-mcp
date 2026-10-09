@@ -15,6 +15,10 @@ jobs:
     name: Публикация в PyPI
     runs-on: ubuntu-latest
     environment: pypi
+    # id-token нужен для trusted publishing (OIDC): action использует его, когда секрет PYPI_API_TOKEN пуст
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6

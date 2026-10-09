@@ -23,7 +23,18 @@ CI (`.github/workflows/ci.yml`) на каждый push и PR: ruff, mypy, pytest
 
 Публикация в PyPI (`.github/workflows/publish.yml`) запускается тегом `vX.Y.Z` или вручную. Перед тегом версия
 в `src/yandex_calendar_mcp/__init__.py` должна совпадать с тегом, иначе workflow падает до сборки.
-Нужен секрет `PYPI_API_TOKEN` в окружении `pypi` репозитория (как в `best-doctor/mcp-yandex-wiki`).
+Авторизация в PyPI, любой из двух способов:
+
+1. **Trusted publishing (OIDC), без секретов.** На PyPI: Your account → Publishing → Add a new pending publisher:
+   PyPI project name `yandex-calendar-mcp`, owner `best-doctor`, repository `yandex-calendar-mcp`,
+   workflow name `publish.yml`, environment name `pypi`. После первой публикации проект привязывается к этому
+   workflow. В job выдано право `id-token: write`, action сам использует OIDC, если секрет пуст.
+2. **API-токен.** Секрет `PYPI_API_TOKEN` в окружении `pypi` репозитория (как в `best-doctor/mcp-yandex-wiki`).
+   Если секрет задан, он имеет приоритет над OIDC.
+
+Если секрет не задан и pending publisher не создан, workflow падает на шаге публикации с
+`Trusted publishing exchange failure`. Упавший запуск по тегу можно перезапустить кнопкой Re-run jobs
+или вручную через Run workflow после настройки одного из способов.
 
 ```bash
 # 1. поднять __version__ в src/yandex_calendar_mcp/__init__.py, закоммитить
