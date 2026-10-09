@@ -1,0 +1,21 @@
+tests/test_yandex_samples.py
+  s_2c71a8ec26c33c::t_9c8490eb52dee7 1-456
+tests/test_freebusy.py
+  s_2c71a8ec26c33c::t_3e7ad4820ccf3a 15,31,53,85-86,92-93
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "37b26c418eaec92b88f4a0782dcbe9c94aeb9784",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
