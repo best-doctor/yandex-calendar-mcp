@@ -1,92 +1,90 @@
 # yandex-calendar-mcp
 
-MCP-сервер для Яндекс Календаря поверх CalDAV (`https://caldav.yandex.ru`).
-Стек: `mcp` 2.x (MCPServer), `caldav` 3.x, `pydantic` + `pydantic-settings`, `backoff`.
+[![PyPI](https://img.shields.io/pypi/v/yandex-calendar-mcp.svg)](https://pypi.org/project/yandex-calendar-mcp/)
+[![CI](https://github.com/best-doctor/yandex-calendar-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/best-doctor/yandex-calendar-mcp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**Статус:** чтение и запись проверены на живом аккаунте Яндекс 360. Режим задаётся переменной
-`YANDEX_CALDAV_MODE`: `readonly` (по умолчанию) регистрирует только тулы чтения, `write` добавляет
-создание, изменение и удаление.
+MCP-сервер для Яндекс Календаря. Подключается по CalDAV к `caldav.yandex.ru` и даёт модели доступ
+к событиям, задачам и занятости коллег: чтение всегда, запись только в режиме `write`.
 
-## 1. Как выписать пароль приложения
+## 1. Получить пароль приложения
 
-Яндекс не пускает в CalDAV по основному паролю. Нужен отдельный «пароль приложения».
+Яндекс не пускает в CalDAV по основному паролю аккаунта, нужен отдельный пароль приложения.
 
-1. Открыть <https://id.yandex.ru/security/app-passwords> (нужно быть залогиненным в Яндекс ID).
+1. Открыть <https://id.yandex.ru/security/app-passwords>, залогинившись в Яндекс ID.
 2. В блоке «Создать пароль приложения» выбрать тип **«Календарь»**.
-3. Ввести любое название (например `mcp`) и нажать «Далее».
+3. Ввести любое название, например `mcp`, и нажать «Далее».
 4. Скопировать пароль из всплывающего окна. Он показывается **один раз**.
-5. Яндекс предупреждает: пароль может заработать не сразу, иногда нужно подождать до 2–3 часов.
+5. Пароль может заработать не сразу, Яндекс просит подождать до 2–3 часов.
 
-Для аккаунтов Яндекс 360 для бизнеса логин — полный адрес на вашем домене (`user@company.ru`).
-Если в организации включён запрет на пароли приложений, администратор должен его снять.
+Для Яндекс 360 для бизнеса логин это полный адрес на домене компании (`user@company.ru`). Если в организации
+запрещены пароли приложений, запрет снимает администратор.
 
-Источник: [Синхронизация с десктопными клиентами](https://yandex.ru/support/yandex-360/business/calendar/ru/data-exchange/synchronization/sync-desktop).
+Источник: [инструкция Яндекса по синхронизации календаря](https://yandex.ru/support/yandex-360/business/calendar/ru/data-exchange/synchronization/sync-desktop).
 
-Параметры подключения:
+## 2. Подключить
 
-| Параметр | Значение |
+Нужен [uv](https://docs.astral.sh/uv/getting-started/installation/): команда `uvx` скачает пакет с PyPI и запустит его.
+Переменные окружения:
+
+| Переменная | Значение |
 |---|---|
-| Сервер | `https://caldav.yandex.ru` |
-| Порт | `443`, TLS |
-| Логин | полный адрес `login@yandex.ru` или `login@домен` |
-| Пароль | пароль приложения «Календарь» |
-| Principal (если клиент не находит сам) | `/principals/users/login@домен/` |
+| `YANDEX_CALDAV_EMAIL` | полный адрес, `login@yandex.ru` или `login@домен` |
+| `YANDEX_CALDAV_KEY` | пароль приложения из шага 1 |
+| `YANDEX_CALDAV_MODE` | `readonly` (по умолчанию) или `write` |
+| `YANDEX_CALDAV_TZ` | таймзона для дат, по умолчанию `Europe/Moscow` |
 
-## 2. Настройка
-
-```bash
-cp .env.example .env
-```
-
-Заполнить в `.env`:
-
-```
-YANDEX_CALDAV_EMAIL=login@yandex.ru
-YANDEX_CALDAV_KEY=<пароль приложения>
-```
-
-Режим записи включается `YANDEX_CALDAV_MODE=write`. Остальные переменные необязательны:
-`YANDEX_CALDAV_TZ` (по умолчанию `Europe/Moscow`), `YANDEX_CALDAV_TIMEOUT`.
-
-Проверка подключения (только чтение):
+Claude Code, только чтение:
 
 ```bash
-uv run python scripts/check_connection.py
+claude mcp add yandex-calendar \
+  -e YANDEX_CALDAV_EMAIL=login@yandex.ru \
+  -e YANDEX_CALDAV_KEY=пароль_приложения \
+  -- uvx yandex-calendar-mcp@latest
 ```
 
-Проверка записи: создаёт, меняет и удаляет тестовое событие, серию из трёх экземпляров и задачу, участников
-не добавляет. Для серии правит и удаляет по одному экземпляру и проверяет `sync_changes` до и после удаления,
-поэтому прогон занимает около минуты:
+Claude Code, с записью (`YANDEX_CALDAV_MODE=write` включает тулы создания, изменения и удаления):
 
 ```bash
-YANDEX_CALDAV_MODE=write uv run python scripts/check_write_cycle.py
+claude mcp add yandex-calendar \
+  -e YANDEX_CALDAV_EMAIL=login@yandex.ru \
+  -e YANDEX_CALDAV_KEY=пароль_приложения \
+  -e YANDEX_CALDAV_MODE=write \
+  -- uvx yandex-calendar-mcp@latest
 ```
 
-Запуск сервера:
-
-```bash
-uv run yandex-calendar-mcp
-```
-
-Подключение к Claude Code / Claude Desktop (`stdio`):
+Claude Desktop и другие клиенты с JSON-конфигом:
 
 ```json
 {
   "mcpServers": {
     "yandex-calendar": {
-      "command": "uv",
-      "args": ["--directory", "/Users/v.katolyk/ClaudeProjects/yandex-calendar-mcp", "run", "yandex-calendar-mcp"],
-      "env": {"YANDEX_CALDAV_MODE": "readonly"}
+      "command": "uvx",
+      "args": ["yandex-calendar-mcp@latest"],
+      "env": {
+        "YANDEX_CALDAV_EMAIL": "login@yandex.ru",
+        "YANDEX_CALDAV_KEY": "пароль_приложения",
+        "YANDEX_CALDAV_MODE": "readonly"
+      }
     }
   }
 }
 ```
 
-`.env` читается из рабочей директории, поэтому `--directory` обязателен.
+Точка входа `yandex-calendar-mcp-ro` всегда поднимает режим чтения, что бы ни стояло в `YANDEX_CALDAV_MODE`:
+
+```bash
+uvx --from yandex-calendar-mcp@latest yandex-calendar-mcp-ro
+```
+
+Запуск из исходников и проверка подключения описаны в [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## 3. Тулы
 
-### Чтение (реализовано)
+Даты принимаются в ISO 8601: `2026-10-09` означает весь день, `2026-10-09T15:00` точный момент
+в таймзоне `YANDEX_CALDAV_TZ`. `calendar_id` берётся из `list_calendars`; без него запрос идёт по всем календарям.
+
+### Чтение
 
 | Тул | Что делает |
 |---|---|
@@ -102,13 +100,6 @@ uv run yandex-calendar-mcp
 | `sync_changes` | Изменения одного календаря после `sync_token` (RFC 6578): события, задачи, URL удалённых |
 | `check_availability` | Занятость участников по их календарям через scheduling outbox и общие свободные окна. Как наложение календарей в веб-интерфейсе. Уведомлений не шлёт |
 
-Тулы чтения помечены `read_only_hint=true`; все тулы возвращают структурированный вывод (pydantic-модели).
-`calendar_id` можно не передавать, тогда запрос идёт по всем календарям с нужным компонентом.
-
-Даты: строка ровно `YYYY-MM-DD` означает весь день включительно, любая другая строка (`2026-10-09T15:00`, `2026-10-09T00:00Z`)
-точный момент в таймзоне `YANDEX_CALDAV_TZ`. Ожидаемые ошибки (не найдено, конфликт, невалидный ввод,
-отказ авторизации) возвращаются модели текстом с `is_error`, а не трейсбеком.
-
 ### Запись (только в режиме `write`)
 
 | Тул | Что делает | Аннотация |
@@ -121,96 +112,9 @@ uv run yandex-calendar-mcp
 | `complete_todo` | Отметить задачу выполненной. Повторный вызов не ошибка | destructive |
 | `delete_todo` | Удалить задачу | destructive |
 
-Время пишется с `TZID` и VTIMEZONE: при создании в `YANDEX_CALDAV_TZ`, при правке в зоне самого события.
-В UTC писать нельзя: серия в зоне с переходом на летнее время уехала бы на час после перехода.
-Для события на весь день `end` не включается, как DTEND в RFC 5545: один день 10.10 это `end=2026-10-11`.
-
 **Правило для встреч.** Перед `create_event` и перед переносом через `update_event` модель обязана вызвать
 `check_availability` для всех участников на нужный слот. При пересечении (`BUSY` или `BUSY-TENTATIVE`)
 встреча не ставится молча: модель показывает пересечения и общие свободные окна и уточняет у пользователя.
 Правило зашито в `instructions` сервера и в описания обоих тулов.
-Перенос `start` всей серии сдвигает вместе с ней RECURRENCE-ID перенесённых экземпляров, сами они остаются на своём
-времени. Если у серии есть удалённые экземпляры, перенос отклоняется до записи (см. особенности Яндекса ниже).
 
-Один экземпляр серии адресуется полем `recurrence_id` из `list_events`: это исходное начало экземпляра, оно не меняется
-при переносе. Правка создаёт переопределение (VEVENT с RECURRENCE-ID в том же объекте) или меняет существующее.
-Удаление добавляет EXDATE в мастер и убирает переопределение. Если у серии нет такого экземпляра, тул возвращает ошибку,
-а не создаёт висящее переопределение.
-
-`sync_changes` работает в два шага. Первый вызов без `sync_token` возвращает только токен (`baseline=true`).
-Следующий вызов с этим токеном отдаёт изменённые после него объекты и новый токен. Серии приходят мастером
-и переопределениями, без раскрытия. Удалённые объекты отдаются в `deleted_urls`, их можно сопоставить с `url` событий.
-`respond_to_invite` на живом аккаунте не проверялся: для этого нужно чужое приглашение, а ответ уйдёт организатору.
-
-## 4. Архитектура
-
-```
-src/yandex_calendar_mcp/
-  config.py   Settings (pydantic-settings, env-префикс YANDEX_CALDAV_, пароль в SecretStr)
-  dto.py      Неизменяемые pydantic-DTO: ответы и входные EventCreateDto/EventUpdateDto/TodoCreateDto
-  errors.py   Доменные ошибки
-  ical.py     Чистые функции: VEVENT/VTODO ↔ DTO, сборка объектов для PUT, нормализация дат, свободные окна
-  freebusy.py Чистые функции: запрос VFREEBUSY в outbox и разбор schedule-response
-  client.py   Логика: YandexCalendarClient поверх caldav.DAVClient, backoff-ретраи
-  server.py   Presentation: фабрика server__build(settings), тулы чтения всегда, записи только в write
-scripts/check_connection.py   smoke-тест чтения
-scripts/check_write_cycle.py  живой цикл создать → изменить → удалить
-tests/test_parsing.py         офлайн-тесты парсинга, повестки и свободных окон
-tests/test_recurrence_and_sync.py  офлайн-тесты экземпляров серии, sync и разбора HTTP-кода ошибок
-```
-
-Слои: `server` → `client` → `ical`/`dto`. `ical` не знает о сети, `server` не знает об iCalendar.
-
-Проверки перед коммитом:
-
-```bash
-uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest -q
-```
-
-Ретраи (`backoff.expo`, до 4 попыток / 60 с): сетевые ошибки, таймауты, 5xx, 429, в том числе для PUT и DELETE
-(они идемпотентны: PUT идёт с фиксированным uid).
-Без ретраев: 401/403 (`AuthorizationError`), 404 (`NotFoundError`), прочие 4xx. У ошибок caldav нет атрибута с кодом
-ответа, поэтому код берётся из текста ошибки (`ReportError at '400 Bad Request'`).
-
-Особенности Yandex CalDAV, подтверждённые на живом аккаунте:
-
-- `/.well-known/caldav` отдаёт 404, автообнаружение principal не работает. Клиент использует
-  документированный путь `/principals/users/<email>/`.
-- События и задачи лежат в разных коллекциях: `events-*` поддерживают только VEVENT, `todos-*` только VTODO.
-  Запрос VTODO к событийному календарю (и наоборот) заставляет сервер отдать всю коллекцию целиком,
-  а фильтрует уже клиент. Поэтому все запросы идут только в календари с нужным компонентом.
-- Повторяющиеся события раскрывает caldav на клиенте (`search(expand=True)` по умолчанию не просит сервер),
-  экземпляры получают RECURRENCE-ID.
-- Сервер возвращает SUMMARY/DESCRIPTION/LOCATION с пробелом в конце строки. Библиотека caldav молча
-  чинит это и пишет diff на уровне WARNING; логгер `caldav` в сервере опущен до ERROR.
-- При поиске объекта по uid ETag не приходит, поэтому `If-Match` при сохранении не отправляется:
-  конфликт одновременных правок сервер не ловит.
-- Сервер объявляет `calendar-auto-schedule`, то есть рассылку приглашений берёт на себя.
-- Занятость коллег отдаётся POST-запросом VFREEBUSY в `schedule outbox` (RFC 6638) с типами `BUSY` и
-  `BUSY-TENTATIVE`. Неизвестный адрес приходит с `request-status 3.8;No authority`. Обычный free-busy REPORT
-  на календарь отвечает 400. Библиотека caldav ответ outbox не разбирает, поэтому запрос и разбор в `freebusy.py`.
-- Серия хранится одним объектом: мастер с RRULE и переопределения с RECURRENCE-ID, всё с `TZID=Europe/Moscow`.
-  RECURRENCE-ID нового переопределения пишется в таймзоне мастера.
-- sync-collection (RFC 6578) поддерживается, токен имеет вид `sync-token:1 <unix ms>`. Первичный REPORT без токена
-  на большом календаре падает с `507 Insufficient Storage`, поэтому базовый токен берётся через PROPFIND
-  `{DAV:}sync-token`. Неизвестный токен сервер отклоняет с 400.
-- Дельта sync отстаёт: созданный объект появляется через 3–15 с, удалённый через 40–90 с. Запись об удалении
-  получает время позже фактического удаления, поэтому по уже выданному токену она не теряется.
-- При переносе времени серии Яндекс выбрасывает все EXDATE, и удалённые экземпляры воскресают. Вернуть EXDATE
-  следующим PUT нельзя: сервер отвечает `504 Gateway Timeout` даже через минуту. Поэтому `update_event` с новым
-  `start` для серии с удалёнными экземплярами отказывает. Переопределения перенос переживают, удалять экземпляры
-  после переноса можно.
-- `COUNT` в RRULE Яндекс переписывает в `UNTIL`.
-- На удалённый URL calendar-multiget отвечает 404, caldav при этом создаёт объект с `data=None`.
-  Ещё multiget собирает URL с `@` вместо `%40`, поэтому в ответе sync URL берётся из дельты, как в `list_events`.
-- Свойство `URL` у Яндекса это ссылка на событие в веб-календаре, она отдаётся как `web_url`. Ссылка на звонок
-  у сторонних сервисов (ktalk, Zoom) лежит в `LOCATION` или `DESCRIPTION`; `conference_url` заполняется
-  только из `X-TELEMOST-CONFERENCE`/`CONFERENCE`.
-
-## 5. План работ
-
-1. ✅ Скаффолд, настройки, DTO, клиент, тулы чтения, офлайн-тесты.
-2. ✅ Живая проверка чтения: 10 календарей, повторяющиеся события, задачи.
-3. ✅ Write-слой за `YANDEX_CALDAV_MODE=write`, живой цикл создать → изменить → удалить для события и задачи.
-4. Проверить `respond_to_invite` на реальном приглашении, когда будет уместно отвечать организатору.
-5. ✅ Правка и удаление одного экземпляра серии, `sync_changes` по sync-token. Проверено живым циклом.
+Подробности поведения, архитектура и особенности Yandex CalDAV: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
