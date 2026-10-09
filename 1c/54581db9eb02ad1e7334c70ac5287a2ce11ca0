@@ -1,0 +1,38 @@
+src/yandex_calendar_mcp/client.py
+  s_4c4feb86575324::t_2181be459627c3 37,78,569-584
+  s_4c4feb86575324::t_ca6acaaeefa30b 585
+docs/DEVELOPMENT.md
+  s_4c4feb86575324::t_dc013d54e0d418 86,153-156
+src/yandex_calendar_mcp/dto.py
+  s_4c4feb86575324::t_2181be459627c3 130-140
+README.md
+  s_4c4feb86575324::t_dc013d54e0d418 146
+tests/test_yandex_samples.py
+  s_4c4feb86575324::t_65cceaade20527 17,22,525-582
+src/yandex_calendar_mcp/people.py
+  s_4c4feb86575324::t_f3eeb15b6a01a7 1-31,35-38
+  s_4c4feb86575324::t_2181be459627c3 32-34
+CHANGELOG.md
+  s_4c4feb86575324::t_dc013d54e0d418 8-12
+src/yandex_calendar_mcp/server.py
+  s_4c4feb86575324::t_2181be459627c3 36,118,276-290
+  s_4c4feb86575324::t_3af9f9fefbb51f 291
+tests/test_parsing.py
+  s_4c4feb86575324::t_65cceaade20527 245
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1c54581db9eb02ad1e7334c70ac5287a2ce11ca0",
+  "prompts": {},
+  "sessions": {
+    "s_4c4feb86575324": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "05c25c34-c94e-48b1-a06d-aa10d3f9993d",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
