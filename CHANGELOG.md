@@ -5,6 +5,8 @@
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-10-09
+
 ### Исправлено
 
 - `get_event`, `update_event`, `delete_event`, `respond_to_invite` и операции с задачами по uid работали 15–40 с:
