@@ -21,6 +21,7 @@ from yandex_calendar_mcp import __version__
 from yandex_calendar_mcp.client import YandexCalendarClient
 from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.dto import (
+    AvailabilityResult,
     CalendarInfo,
     ConnectionInfo,
     DateLikeInput,
@@ -43,6 +44,7 @@ from yandex_calendar_mcp.errors import (
     InvalidEventError,
     SyncTokenError,
 )
+from yandex_calendar_mcp.ical import date_like__to_datetime
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, idempotent_hint=True, open_world_hint=True)
 WRITE = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=False, open_world_hint=True)
@@ -111,6 +113,10 @@ def server__build(settings: Settings) -> MCPServer:
             'Яндекс Календарь через CalDAV. Даты принимаются в ISO 8601 (2026-10-08 или 2026-10-08T15:00). '
             'Без таймзоны считаются локальными (см. timezone в ответах). '
             'calendar_id берётся из list_calendars; если не указан, запрос идёт по всем календарям. '
+            'Правило для встреч: перед create_event и перед переносом через update_event всегда вызывай '
+            'check_availability для всех участников на нужный слот. Если у кого-то есть пересечение '
+            '(BUSY или BUSY-TENTATIVE), не ставь встречу молча: покажи пересечения и общие свободные окна '
+            'и уточни у пользователя. '
             f'Режим: {settings.mode}.'
         ),
         lifespan=lifespan,
@@ -158,11 +164,22 @@ def tools__register_read(mcp: MCPServer) -> None:
 
     @mcp.tool(
         annotations=READ_ONLY,
-        description='Одно событие по UID: участники со статусами, организатор, ссылка на встречу.',
+        description=(
+            'Одно событие по UID: участники со статусами, организатор, ссылка на встречу. '
+            'Для повторяющегося события без occurrence возвращается мастер серии (дата первого экземпляра); '
+            'с occurrence — экземпляр, начинающийся в этот день.'
+        ),
     )
     @domain_errors__as_tool_error
-    def get_event(ctx: Context, uid: str, calendar_id: CalendarIdParam = None) -> EventInfo:
-        return client__from_context(ctx).event__get(uid, calendar_id=calendar_id)
+    def get_event(
+        ctx: Context,
+        uid: str,
+        calendar_id: CalendarIdParam = None,
+        occurrence: typing.Annotated[
+            datetime.date | None, Field(description='Дата экземпляра повторяющегося события, ISO 8601')
+        ] = None,
+    ) -> EventInfo:
+        return client__from_context(ctx).event__get(uid, calendar_id=calendar_id, occurrence=occurrence)
 
     @mcp.tool(
         annotations=READ_ONLY, description='Сырой iCalendar (VCALENDAR) события по UID. Для отладки и редких полей.'
@@ -255,13 +272,45 @@ def tools__register_read(mcp: MCPServer) -> None:
     ) -> SyncResult:
         return client__from_context(ctx).sync__changes(calendar_id, sync_token=sync_token)
 
+    @mcp.tool(
+        annotations=READ_ONLY,
+        description=(
+            'Занятость участников по их календарям (как наложение календарей в веб-интерфейсе) и общие свободные окна. '
+            'Свой адрес добавляется автоматически. BUSY-TENTATIVE = приглашение без ответа. '
+            'Уведомления участникам не отправляются.'
+        ),
+    )
+    @domain_errors__as_tool_error
+    def check_availability(
+        ctx: Context,
+        attendees: typing.Annotated[list[str], Field(min_length=1, description='E-mail участников')],
+        start: DateParam = None,
+        end: DateParam = None,
+        min_minutes: typing.Annotated[int, Field(ge=5, le=480)] = 30,
+        work_start: typing.Annotated[datetime.time, Field(description='HH:MM')] = datetime.time(9, 0),
+        work_end: typing.Annotated[datetime.time, Field(description='HH:MM')] = datetime.time(19, 0),
+    ) -> AvailabilityResult:
+        client = client__from_context(ctx)
+        today = datetime.datetime.now(client.tz).date()
+        start_dt = date_like__to_datetime(start if start is not None else today, client.tz)
+        end_dt = date_like__to_datetime(end if end is not None else start_dt.date(), client.tz, end_of_day=True)
+        return client.availability__check(
+            attendees=attendees,
+            start=start_dt,
+            end=end_dt,
+            min_minutes=min_minutes,
+            work_start=work_start,
+            work_end=work_end,
+        )
+
 
 def tools__register_write(mcp: MCPServer) -> None:
     @mcp.tool(
         annotations=WRITE,
         description=(
             'Создать событие. Без calendar_id берётся первый календарь с поддержкой VEVENT. '
-            'Дата без времени = событие на весь день.'
+            'Дата без времени = событие на весь день. Участникам уйдут приглашения. '
+            'Перед вызовом проверь слот через check_availability и при пересечениях уточни у пользователя.'
         ),
     )
     @domain_errors__as_tool_error
@@ -272,7 +321,9 @@ def tools__register_write(mcp: MCPServer) -> None:
         annotations=DESTRUCTIVE,
         description=(
             'Изменить поля события по uid. Передаются только меняемые поля. '
-            'Для повторяющегося события без recurrence_id меняется вся серия, с recurrence_id только этот экземпляр.'
+            'Для повторяющегося события без recurrence_id меняется вся серия, с recurrence_id только этот экземпляр. '
+            'При переносе start/end сначала проверь новый слот через check_availability и при пересечениях '
+            'уточни у пользователя.'
         ),
     )
     @domain_errors__as_tool_error

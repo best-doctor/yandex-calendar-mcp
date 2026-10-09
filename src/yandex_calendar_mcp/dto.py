@@ -94,6 +94,26 @@ class FreeSlot(BaseDto):
     minutes: int
 
 
+class BusyInterval(BaseDto):
+    start: datetime.datetime
+    end: datetime.datetime
+    kind: str = Field(description='BUSY, BUSY-TENTATIVE (приглашение без ответа) или BUSY-UNAVAILABLE')
+
+
+class AttendeeAvailability(BaseDto):
+    email: str
+    request_status: str = Field(description='iTIP request-status, 2.x = успех')
+    busy: list[BusyInterval]
+
+
+class AvailabilityResult(BaseDto):
+    start: datetime.datetime
+    end: datetime.datetime
+    timezone: str
+    attendees: list[AttendeeAvailability]
+    common_free: list[FreeSlot] = Field(description='Окна, свободные у всех участников')
+
+
 class EventList(BaseDto):
     events: list[EventInfo]
     count: int

@@ -185,8 +185,22 @@ def free_slots__between_events(
             continue
         event_end = event.end if isinstance(event.end, datetime.datetime) else event.start + datetime.timedelta(hours=1)
         busy.append((event.start, event_end))
-    busy.sort()
+    return free_slots__between_busy(
+        busy, start=start, end=end, min_minutes=min_minutes, work_start=work_start, work_end=work_end, tz=tz
+    )
 
+
+def free_slots__between_busy(
+    busy: list[tuple[datetime.datetime, datetime.datetime]],
+    *,
+    start: datetime.datetime,
+    end: datetime.datetime,
+    min_minutes: int,
+    work_start: datetime.time,
+    work_end: datetime.time,
+    tz: zoneinfo.ZoneInfo,
+) -> list[FreeSlot]:
+    busy = sorted(busy)
     slots: list[FreeSlot] = []
     day = start.date()
     while day <= end.date():

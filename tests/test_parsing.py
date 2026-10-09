@@ -17,7 +17,7 @@ from pydantic import SecretStr
 from yandex_calendar_mcp.client import YandexCalendarClient
 from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.dto import EventCreateDto, EventInfo, EventUpdateDto, TodoCreateDto
-from yandex_calendar_mcp.errors import InvalidEventError
+from yandex_calendar_mcp.errors import EventNotFoundError, InvalidEventError
 from yandex_calendar_mcp.ical import (
     calendar_id__from_url,
     events__by_days,
@@ -233,6 +233,7 @@ READ_TOOLS = {
     'search_events',
     'list_todos',
     'find_free_slots',
+    'check_availability',
 }
 WRITE_TOOLS = {
     'create_event',
@@ -398,3 +399,24 @@ def test_date_param_keeps_date_only_strings_as_dates(raw: str, expected: datetim
     """Строка без времени разбирается как дата (весь день), со временем как дата-время."""
     assert pydantic.TypeAdapter(DateParam).validate_python(raw) == expected
     assert type(pydantic.TypeAdapter(DateParam).validate_python(raw)) is type(expected)
+
+
+ICS_INSTANCE_OCT_15 = ICS_TIMED.replace('20261008', '20261015').replace(
+    'RRULE:FREQ=WEEKLY\n', 'RECURRENCE-ID;TZID=Europe/Moscow:20261015T150000\n'
+)
+
+
+def test_get_event_occurrence_returns_instance_for_date(client: YandexCalendarClient) -> None:
+    """С occurrence возвращается экземпляр серии на эту дату, а не мастер с датой первого вхождения."""
+    master = FakeObject(ICS_TIMED)
+    with (
+        mock.patch.object(client, 'calendars__for_query', return_value=[_fake_calendar()]),
+        mock.patch.object(client, 'object__by_uid', return_value=master),
+        mock.patch.object(client, 'objects__search', return_value=[FakeObject(ICS_INSTANCE_OCT_15)]),
+    ):
+        event = client.event__get('abc-123', occurrence=datetime.date(2026, 10, 15))
+        assert event.start == datetime.datetime(2026, 10, 15, 15, 0, tzinfo=MSK)
+        assert event.recurrence_id == datetime.datetime(2026, 10, 15, 15, 0, tzinfo=MSK)
+
+        with pytest.raises(EventNotFoundError):
+            client.event__get('abc-123', occurrence=datetime.date(2026, 10, 16))

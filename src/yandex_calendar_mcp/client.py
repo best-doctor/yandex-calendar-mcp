@@ -11,13 +11,14 @@ import uuid
 
 import backoff
 from caldav.calendarobjectresource import CalendarObjectResource, Todo
-from caldav.collection import Calendar, Principal, SynchronizableCalendarObjectCollection
+from caldav.collection import Calendar, Principal, ScheduleOutbox, SynchronizableCalendarObjectCollection
 from caldav.davclient import DAVClient
 from caldav.elements import dav
 from caldav.lib import error as caldav_error
 
 from yandex_calendar_mcp.config import Settings
 from yandex_calendar_mcp.dto import (
+    AvailabilityResult,
     CalendarInfo,
     ConnectionInfo,
     DayAgenda,
@@ -38,6 +39,7 @@ from yandex_calendar_mcp.errors import (
     InvalidEventError,
     SyncTokenError,
 )
+from yandex_calendar_mcp.freebusy import common_free__compute, freebusy_request__build, schedule_response__parse
 from yandex_calendar_mcp.ical import (
     DateLike,
     calendar_id__from_url,
@@ -286,8 +288,16 @@ class YandexCalendarClient:
                 continue
         raise EventNotFoundError(f'Событие с uid {uid!r} не найдено')
 
-    def event__get(self, uid: str, *, calendar_id: str | None = None) -> EventInfo:
+    def event__get(
+        self, uid: str, *, calendar_id: str | None = None, occurrence: datetime.date | None = None
+    ) -> EventInfo:
+        """Без occurrence возвращает мастер-объект; для серии это первый экземпляр с RRULE.
+
+        С occurrence возвращает экземпляр серии, начинающийся в этот день (с учётом переопределений).
+        """
         cal, obj = self.object__find(uid, calendar_id=calendar_id)
+        if occurrence is not None:
+            return self.event__occurrence(cal, uid, occurrence)
         events = events__from_icalendar(
             obj.get_icalendar_instance(),
             calendar_id=calendar_id__from_url(str(cal.url)),
@@ -297,6 +307,14 @@ class YandexCalendarClient:
         if not events:
             raise EventNotFoundError(f'Объект {uid!r} не содержит VEVENT')
         return events[0]
+
+    def event__occurrence(self, cal: Calendar, uid: str, occurrence: datetime.date) -> EventInfo:
+        """Экземпляр события на дату через серверный expand за один день."""
+        calendar_id_current = calendar_id__from_url(str(cal.url))
+        for event in self.events__list(start=occurrence, end=occurrence, calendar_id=calendar_id_current, expand=True):
+            if event.uid == uid and date_like__to_date(event.start) == occurrence:
+                return event
+        raise EventNotFoundError(f'У события {uid!r} нет экземпляра на {occurrence.isoformat()}')
 
     def event__get_raw(self, uid: str, *, calendar_id: str | None = None) -> str:
         _, obj = self.object__find(uid, calendar_id=calendar_id)
@@ -426,6 +444,50 @@ class YandexCalendarClient:
             events=events,
             todos=todos,
             deleted_urls=[str(url) for url in urls if url.canonical() not in loaded_urls],
+        )
+
+    # ------------------------------------------------------------ занятость
+    @retry_on_transient_error
+    def outbox__post(self, body: str) -> str:
+        outbox = typing.cast(ScheduleOutbox, self.principal.schedule_outbox())
+        outbox_url = str(outbox.url)
+        response = self.dav.post(outbox_url, body, headers={'Content-Type': 'text/calendar; charset=utf-8'})
+        if response.status != 200:
+            raise caldav_error.ResponseError(f'schedule outbox answered {response.status}')
+        raw = response.raw
+        return raw if isinstance(raw, str) else raw.decode('utf-8', 'replace')
+
+    def availability__check(
+        self,
+        *,
+        attendees: list[str],
+        start: datetime.datetime,
+        end: datetime.datetime,
+        min_minutes: int,
+        work_start: datetime.time,
+        work_end: datetime.time,
+    ) -> AvailabilityResult:
+        """Занятость участников через scheduling outbox: сервер отвечает VFREEBUSY по каждому адресу.
+
+        Запрос без побочных эффектов: уведомления участникам не уходят. Свой адрес добавляется автоматически.
+        """
+        emails = list(dict.fromkeys([self.settings.email, *attendees]))
+        body = freebusy_request__build(organizer=self.settings.email, attendees=emails, start=start, end=end)
+        parsed = schedule_response__parse(self.outbox__post(body), tz=self.tz)
+        return AvailabilityResult(
+            start=start,
+            end=end,
+            timezone=self.tz.key,
+            attendees=parsed,
+            common_free=common_free__compute(
+                parsed,
+                start=start,
+                end=end,
+                min_minutes=min_minutes,
+                work_start=work_start,
+                work_end=work_end,
+                tz=self.tz,
+            ),
         )
 
     # ---------------------------------------------------------------- запись
