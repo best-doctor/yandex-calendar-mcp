@@ -1,0 +1,21 @@
+.github/workflows/publish.yml
+  s_2c71a8ec26c33c::t_68dd023f133275 18-21
+docs/DEVELOPMENT.md
+  s_2c71a8ec26c33c::t_8ab010387c0796 26-37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "193c3ed5367fb9db9e47c0a9295bd30bd1b313d8",
+  "prompts": {},
+  "sessions": {
+    "s_2c71a8ec26c33c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "280dd0da-debf-4f4a-933a-f8081c8c96f7",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "Vladislav Katolyk <v.katolyk@bestdoctor.ru>"
+    }
+  }
+}
